@@ -1,0 +1,14 @@
+excerpt 1: 27 lines, longest 62 chars, 0 blank lines -> OK
+excerpt 2: 15 lines, longest 64 chars, 0 blank lines -> OK
+excerpt 3: 28 lines, longest 64 chars, 0 blank lines -> OK
+excerpt 1 defines: AGENT, ARGS, OP, RESULT, TOOL, json, steps_from_spans
+excerpt 1  steps_from_spans(failing run) -> [('customer', 'msg->orchestrator'), ('orchestrator', 'msg->policy-agent'), ('policy-agent', 'get_order'), ('policy-agent', 'check_policy'), ('policy-agent', 'msg->orchestrator'), ('orchestrator', 'msg->billing-agent'), ('billing-agent', 'issue_refund'), ('billing-agent', 'request_approval'), ('billing-agent', 'send_email'), ('billing-agent', 'msg->orchestrator'), ('orchestrator', 'msg->customer')]
+excerpt 2 defines: NEEDS, handoff_gaps
+excerpt 2  handoff_gaps(failing handoff) -> ["needs_approval: knew True, sent '<missing>'"]
+excerpt 2  handoff_gaps(correct handoff) -> []
+excerpt 3 defines: blame, money_rule
+excerpt 3  blame(failing run) -> cause (6, 'orchestrator', 'handoff to billing-agent', ["needs_approval: knew True, sent '<missing>'"])
+                                 symptom (7, 'billing-agent', 'issue_refund', ['refund before approval'])
+excerpt 3  blame(correct run) -> (None, None)
+excerpt 3  blame(control: billing ignores the flag) -> ((7, 'billing-agent', 'issue_refund', ['refund before approval']), (7, 'billing-agent', 'issue_refund', ['refund before approval']))
+excerpts match the harness: OK

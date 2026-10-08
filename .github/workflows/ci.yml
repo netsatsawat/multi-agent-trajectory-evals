@@ -1,0 +1,26 @@
+name: reproduce
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: .python-version
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Run the demo and compare with the committed output
+        run: |
+          python run_demo.py > run_demo.out
+          diff run_demo.out expected/run_demo.txt
+      - name: Run the article's code blocks alone and compare
+        run: |
+          python check_excerpts.py > check_excerpts.out
+          diff check_excerpts.out expected/check_excerpts.txt
+      - name: The excerpts on disk still match the article
+        run: git diff --exit-code excerpts/
