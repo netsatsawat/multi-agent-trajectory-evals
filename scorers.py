@@ -1,8 +1,10 @@
-"""Trajectory scorers. Pure Python, no model, no network.
+"""Score an agent's trajectory, the list of tool calls it made.
 
-Reused unchanged from the single-agent harness: the per-argument policy,
-the fixed in-order matcher, the SQLite end-state check. In the
-multi-agent harness the in-order matcher runs once per agent.
+The scorers are plain Python and need no model or network. The rule
+for each argument and the SQLite end-state check come unchanged from
+the single-agent harness. So does the in-order matcher, which avoids
+the bugs shown in traps.py. In this multi-agent harness, run_demo.py
+runs the in-order matcher once for each agent.
 """
 import json
 
@@ -19,7 +21,7 @@ def mismatch(ref, act, judge):
         return f"tool {act['tool']} != {ref['tool']}"
     rules = ARG_POLICY.get(ref["tool"], {})
     for name in sorted(ref["args"].keys() | act["args"].keys()):
-        rule = rules.get(name, COMPARE)  # unknown arg: strict
+        rule = rules.get(name, COMPARE)  # args with no rule must match exactly
         want = ref["args"].get(name)
         got = act["args"].get(name)
         if rule == IGNORE:
@@ -33,9 +35,9 @@ def mismatch(ref, act, judge):
     return ""
 
 
-# A judge stand-in. In a real setup this is an LLM grader with a rubric
-# (a local model works). Here it is a fixed synonym table, so the run is
-# repeatable and the judge's verdicts are visible in the output.
+# In a real setup the judge is an LLM grader with a rubric, and it can be
+# a local model. This stand-in uses a fixed synonym table instead, so the
+# run repeats exactly and the demo can print every verdict.
 SAME_MEANING = {
     "damaged": {"damaged", "broken", "arrived damaged", "defective"},
 }
@@ -50,7 +52,7 @@ def stub_judge(name, want, got):
 
 
 def strict_judge(name, want, got):
-    """What you get with no argument policy: free text must match."""
+    """Compare free text exactly, as mismatch() does for args with no rule."""
     return want == got
 
 
@@ -73,9 +75,13 @@ def exact_match(reference, actual, judge):
 
 
 def in_order(reference, actual, judge, prefix=False):
-    """Reference calls must appear in order. An extra call is
-    allowed only if its tool is not in the reference, so a
-    skipped refund cannot hide. Returns (passed, step, why)."""
+    """Check that the reference calls appear in order.
+
+    An extra call in between passes only if its tool is not in the
+    reference, so a refund made too early fails instead of being
+    skipped as noise. With prefix=True, a run that stops before the
+    end of the reference still passes. Returns (passed, step, why).
+    """
     if not reference:
         return False, 0, "empty reference: nothing to check"
     ref_tools = {c["tool"] for c in reference}
@@ -116,7 +122,10 @@ def any_order(reference, actual, judge):
 
 
 def precision_recall(reference, actual, judge):
-    """One-to-one matching of calls, order ignored."""
+    """Match calls one to one, ignoring order.
+
+    Returns precision, recall, the number matched and the extra tools.
+    """
     if not reference or not actual:
         raise ValueError("precision/recall undefined on an empty list")
     used, matched = set(), 0
@@ -131,7 +140,10 @@ def precision_recall(reference, actual, judge):
 
 
 def end_state(db, order_id, amount):
-    """Check the SQLite tables after the run, not the agent's words."""
+    """Check the rows the run left in SQLite.
+
+    The check never reads what the agents said.
+    """
     q = lambda sql: db.execute(sql, (order_id,)).fetchall()
     refunds = q("SELECT amount, ts FROM refunds WHERE order_id = ?")
     approvals = q("SELECT amount, ts FROM approvals WHERE order_id = ?")

@@ -2,29 +2,38 @@
 
 [![reproduce](https://github.com/netsatsawat/multi-agent-trajectory-evals/actions/workflows/ci.yml/badge.svg)](https://github.com/netsatsawat/multi-agent-trajectory-evals/actions/workflows/ci.yml)
 
-Score a multi-agent run step by step, check what each agent passes to the next, and find
-which agent caused a failure. A test that reads only the final reply cannot tell you any of
-that. In the run below, the reply is right, the money went out before anyone approved it,
-and the agent that looks guilty is not the one to fix.
+A test that reads only the final reply can pass a multi-agent run where the money goes out
+before anyone approves it. This repo checks every tool call and every message in the run, then
+names the agent that caused the failure.
 
-![A three-agent refund run where the orchestrator leaves the approval flag out of its handoff, billing refunds before approval, and a test on the final reply still passes](assets/hero-handoff.gif)
+![A three-agent refund run. The orchestrator leaves the approval flag out of its message to billing. Billing refunds one second before it asks for approval, but a test on the final reply still passes](assets/hero-handoff.gif)
 
-A customer asks for a refund on order A-1001, worth $450. The orchestrator agent sends the
-case to a policy agent, which finds that a refund this size needs a manager's approval and
-reports `needs_approval: true` back. The orchestrator then hands the case to a billing agent
-but leaves that flag out. Billing, never told, refunds first and asks for approval one second
-later. The customer still gets the right reply, so a test on the final reply passes. Billing
-made the visible mistake, yet it followed its own rule with the facts it was given. The
-orchestrator caused the failure when it dropped the approval flag, so if you grade only the
-agent whose action looks wrong, you fix the wrong agent.
+A customer writes, "My order A-1001 arrived broken. Refund please." The order cost $450. An
+orchestrator agent sends the case to a policy agent, which looks up the order and checks the
+refund rules. The rules say any refund over $100 needs approval, so the policy agent reports
+`needs_approval: true` back to the orchestrator. The orchestrator then passes the case to a
+billing agent, but the orchestrator's message leaves that flag out. We call a message that
+passes work from one agent to another a handoff.
 
-This repo is a worked example to read and copy from, with no package to install. The three
-agents are scripted Python, so it runs offline with no model and no API key. The checks read
-standard OpenTelemetry GenAI spans, so you can point them at your own agents (see
-[Use it on your own agents](#use-it-on-your-own-agents)). It is the runnable companion to the
-article *Multi-Agent Trajectory Evaluation, Explained Simply* (Towards AI, in draft). When an
-image says "the article's harness", it means the code in this repo, and you do not need the
-article to run or adapt it.
+Billing's instruction is to ask for approval first when the handoff says approval is needed.
+With no flag, it refunds first and asks for approval one second later, as a record for the
+audit. The customer still gets the right reply, so a test that reads only that reply passes the
+run.
+
+The orchestrator caused the failure by dropping the flag. Billing made the visible mistake, but
+it only followed its instruction with the facts it had. If your grader checks only the agent
+whose action looks wrong, it blames billing, and you fix billing while the orchestrator keeps
+dropping the flag.
+
+This is not a pip package. You clone the repo and run its Python files. The three agents are
+scripted Python, so the demo runs offline with no model and no API key. The path check, the
+handoff check and `blame` read OpenTelemetry spans. A span is the timed record of one agent
+run, model call or tool call.
+[Use it on your own agents](#use-it-on-your-own-agents) shows how to run the same checks on
+your own agents.
+
+When an image says "the article's harness", it means the code in this repo, which goes with the
+article *Multi-Agent Trajectory Evaluation, Explained Simply* (Towards AI, in draft).
 
 ## Quickstart
 
@@ -33,162 +42,206 @@ uv venv --python 3.12 && uv pip install -r requirements.txt
 .venv/bin/python run_demo.py
 ```
 
-Without uv, `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt` does the
-same job. The only dependency is the OpenTelemetry SDK, pinned to 1.45.0.
+Without uv, run `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`
+instead. The only dependency is the OpenTelemetry SDK, pinned to 1.45.0.
 
-The report has one block per run, and each block ends with its blame verdict under
-`failure attribution`. Every run prints the same report, and CI checks that it still matches
-the copy in `expected/`. On your machine,
-`diff <(.venv/bin/python run_demo.py) expected/run_demo.txt` should print nothing.
-
-A second script, `check_excerpts.py`, checks that the code blocks printed in the article
-still run on their own. You need it only if you edit `attribution.py`.
+You get six blocks of output, one for each part under [The runs](#the-runs). The script prints
+the same output every time, and CI compares it with the copy in `expected/`. When you run
+`diff <(.venv/bin/python run_demo.py) expected/run_demo.txt` on your copy, it should print
+nothing.
 
 ## What it checks
 
-The demo lays each run out as one numbered list of steps in time order. A step is one tool
-call or one message between agents, and the failing run has 11 of them. Step 6 is the
-orchestrator's handoff to billing, and step 7 is billing's refund. A handoff is the message an
-agent sends when it passes work to another agent.
+`run_demo.py` prints each run as a numbered list of steps in time order. A step is one tool call
+or one message, and the customer's request and the final reply count as steps too. We call this
+list the trajectory, the path the agents took. The failing run has 11 steps. At step 5 the
+policy agent reports `needs_approval: true` to the orchestrator, at step 6 the orchestrator
+hands off to billing, and billing refunds at step 7 and asks for approval at step 8.
 
-Every run gets four checks:
+Each run gets four checks. The first two grade the trajectory, and the last two grade the
+outcome.
 
-1. Each agent's path is matched in order against a short reference list for that agent
-   (`REFS` in `run_demo.py`). Extra calls in between are fine, as long as their tool is not
-   in the reference list. Each tool argument has its own rule: IDs and amounts must match
-   exactly, free text goes to a judge, and free-form notes are ignored. The judge here is a
-   fixed table of synonyms (`stub_judge` in `scorers.py`) standing in for a model, and it
-   treats the customer's "broken" as the same as the reference's "damaged".
-2. Each handoff is checked against the facts the receiving agent needs (`NEEDS` in
-   `attribution.py`). For each fact, the check asks whether it arrived and whether its value
-   matches what the sender knew at that moment.
-3. The end state is read straight from the database: which rows the whole system left, and
-   the order they were written in.
-4. The final answer must name the right order and amount.
+1. The path check compares each agent's own calls, in order, with a short reference list for
+   that agent in `REFS` in `run_demo.py`. For the orchestrator, the calls are its handoffs, and
+   the check looks only at which agent gets each one. Calls to tools outside the reference list
+   can come in between. Each argument has its own rule. IDs, amounts and email addresses must
+   match exactly, and a free-text reason goes to a judge, which decides whether two texts mean
+   the same thing. Here the judge is `stub_judge` in `scorers.py`, a small table of synonyms
+   that treats "broken" as the same as "damaged", so the demo needs no model.
+2. The handoff check takes each handoff and the facts the receiving agent needs, listed in
+   `NEEDS` in `attribution.py`. It checks that the handoff carries each fact with the value the
+   sender knew by then. A sender knows a fact once the fact reaches it in a message or in the
+   result of its own tool call.
+3. The final-answer check looks for the right order ID and amount in the reply.
+4. The database check reads what the run wrote to the SQLite database, including the order of
+   the writes. It expects one refund row and one approval row for the right amount, the
+   approval written before the refund, and the order marked as refunded. `end_state` in
+   `scorers.py` runs this check, so the figures and the file table call it the end-state check.
 
-A failing run also gets a blame verdict. The first wrong step is the cause, and the agent
-that owns it gets the blame. A rule broken later is a symptom.
+To find the agent that caused a failure, `blame` in `attribution.py` goes through the steps in
+time order. A handoff is wrong when it fails the handoff check. A tool call is wrong when it
+breaks a rule in `money_rule`, and in this repo the only rule is approval before a refund.
+`blame` takes the first wrong step as the cause and blames its owner, the agent that made that
+call or sent that message. It also reports the first tool call that broke a rule, and calls it
+a symptom when it comes after the cause.
 
-![The failing run and the correct run scored by every check. Billing's path, the handoff to billing and the order of the database writes fail. The final answer passes. Blame goes to the orchestrator at step 6](assets/scored-run.png)
+![The failing run and the correct run scored by every check. In the failing run, billing's path, the handoff to billing and the order of the database writes fail, the final answer passes, and blame goes to the orchestrator at step 6. In the correct run every check passes](assets/scored-run.png)
 
-The failing run passes the final-answer check. Only three checks catch it: billing's path,
-the handoff from the orchestrator, and the order of the database writes. Of those, the
-handoff check points at the real cause:
+In the failing run, the handoff check fails at step 6, one step before billing's early refund,
+so `blame` names the orchestrator.
 
 ![The handoff check going row by row through the four facts billing needs. Order ID, amount and email arrive unchanged, and needs_approval is missing](assets/handoff-check.gif)
 
 ## How it works
 
-![How the harness fits together, from the scripted agents to the blame verdict, and which parts you replace, keep or write for your own system](assets/architecture.png)
+![How the harness fits together, from the scripted agents to the blame verdict. You swap the grey parts for your own system, write the gold ones and keep the blue code](assets/architecture.png)
 
-`run_demo.py` starts each run. The three scripted agents in `agents.py` call their tools on
-one shared SQLite database, and billing's tools write to it with a fake clock, so the
-database timestamps repeat exactly. As the agents work, `agents.py` records the run as
-OpenTelemetry spans, and `tracing.py` keeps them in memory. The names follow the GenAI
-semantic conventions: an `invoke_agent` span per agent, a `chat` span per model turn, an
-`execute_tool` span per tool call, and an `agent.message` event for each message between
-agents. `steps_from_spans` in `attribution.py` turns that span tree into the numbered list of
-steps and gives each step an owner. The path and handoff checks and `blame` run over that
-list, and the end-state check reads the database.
+The three scripted agents in `agents.py` share one SQLite database. Billing's tools stamp each
+row with the time from a fake clock that moves one second per write, so the timestamps are the
+same on every run.
 
-The trace is a tree of spans, one bar per agent, model turn or tool call. The numbered
-diamonds are messages between agents. At 5 the policy agent tells the orchestrator
-`needs_approval: true`, and at 6 the orchestrator hands off to billing without it. The blame
-walk reads the tree in time order:
+As the agents work, `agents.py` records the run as OpenTelemetry spans and `tracing.py` keeps
+them in memory. The span names follow OpenTelemetry's GenAI semantic conventions, its standard
+names for spans from AI models and agents. Each agent gets an `invoke_agent` span. That span
+holds a `chat` span for each model turn, an `execute_tool` span for each tool call and the
+spans of any agent it calls, so the spans form a tree. `agents.py` also records each message an
+agent sends or receives as a span event named `agent.message`.
+
+`steps_from_spans` in `attribution.py` turns the span tree into the numbered list of steps and
+gives each step an owner. In the span tree below, the numbered diamonds are messages between
+agents.
 
 ![The failing run as a span tree. The orchestrator's handoff at step 6 is the first wrong step. Billing's refund at step 7 is the first broken rule, a symptom](assets/span-tree.png)
 
 ## The runs
 
-`run_demo.py` prints these in order, and everything in this section comes from its output.
+`run_demo.py` prints these runs in this order, and every result below comes from its output.
 
 ### Run A, the failing run
 
-The orchestrator leaves `needs_approval` out of its handoff, so billing refunds before it
-asks for approval. Blame goes to the orchestrator at step 6, and billing's refund at step 7
-counts as the symptom.
+Run A is the failing refund at the top of this page, and its scores are under
+[What it checks](#what-it-checks).
 
 ### The replay
 
-Billing runs alone on a fresh database, with the same handoff plus the one fact that was
-missing. It now asks for approval first, and both of its checks pass. Fixing step 6 turns the
-failure into a success, which is what makes step 6 the decisive step.
+To check that step 6 caused the failure, the replay runs billing alone on a fresh database and
+gives it the step 6 handoff with `needs_approval: true` put back. Billing now asks for approval
+first. Its path check and the approval-before-refund check both pass this time, so the missing
+flag caused both failures.
 
 ![The failing run as recorded, next to billing replayed alone with needs_approval put back. Both checks go from FAIL to PASS](assets/replay.gif)
 
 ### Run B, the correct run
 
-The handoff carries the flag, and every check passes.
+With the flag in the handoff, billing asks for approval before it refunds, and every check
+passes.
 
-### Run C, a control
+### Run C, billing at fault
 
-This run checks that blame follows the trace. The handoff is complete, but billing ignores
-the flag and refunds first anyway, so blame lands on billing at step 7.
+Run C checks that `blame` can also name billing. The handoff carries the flag this time, but
+billing ignores it and refunds first anyway. Now billing's refund at step 7 is the first wrong
+step, and `blame` names billing as the cause.
 
 ### Two matcher traps
 
-The first trap is an empty reference list, which is what you get when a test's reference
-fails to load. The second is a run that refunds, asks for approval, then refunds again. A
-contains-all matcher and a greedy in-order matcher both pass these bad runs, and only the
-fixed matcher (`in_order` in `scorers.py`) fails both.
+A matcher compares an agent's calls with its reference list. `traps.py` holds two short
+matchers that pass bad runs. Naive contains-all only checks that each tool in the reference
+list shows up somewhere in the run. Greedy in-order goes through the run and skips any call
+that does not match the next expected one, even a refund made too early. Both pass an empty
+reference list, which you get when a test's reference fails to load. Both also pass a run that
+refunds, asks for approval, then refunds again.
+
+The fixed matcher, `in_order` in `scorers.py`, fails both runs. It fails on an empty reference
+list, and it stops at the first call whose tool is in the reference list but out of order.
 
 ![Both trap runs scored by three matchers. The two short matchers pass both bad runs, and the fixed matcher fails both](assets/matcher-traps.gif)
 
-### Pass^k over 8 runs
+### Eight runs and pass^k
 
-The orchestrator drops the flag with a one-in-four chance on each run, seeded so it repeats.
-Five of the eight runs pass, where a pass means every path, handoff and end-state check
-passes. Pass^k, the chance that all k runs pass, falls from 0.625 at one run to 0.000 at
-eight. Pass@k, the chance that at least one passes, reaches 1.000 at four runs, so by that
-measure the system looks perfect.
+The last block runs the refund case eight times. In each run a flaky orchestrator drops the
+flag with a one-in-four chance, and a fixed random seed gives the same eight results every
+time. A run passes when every path, handoff and database check passes. Five of the eight runs
+pass.
+
+Pass^k is the chance that all k runs pass when you pick k of those eight runs at random.
+`passk.py` works it out with tau-bench's formula, C(c, k) / C(n, k). Here n = 8 is the number
+of runs, c = 5 is the number that passed, and C(n, k) is the number of ways to pick k runs out
+of n. The demo prints 0.625 at k = 1 and 0.000 at k = 8.
+
+Pass@k, the chance that at least one of the k runs passes, reaches 1.000 at k = 4. Only three
+runs failed. Any four runs you pick include a pass, so a system that failed three runs in eight
+still gets a perfect pass@k.
 
 ![Eight runs, five passing. Pass^k falls to zero while pass@k climbs to one](assets/pass-k.png)
 
 ## Use it on your own agents
 
-The scripted agents and `tracing.py` are the parts you replace (grey in the diagram under
-How it works). You fill in a few tables and rules inside the scoring files (gold). The rest of
-the scoring code stays as it is (blue).
+The diagram under [How it works](#how-it-works) shows what to change. You swap the grey parts,
+write the gold ones and keep the blue code. Copy `attribution.py`, `scorers.py` and `passk.py`
+into your own project and edit the copies there. They import nothing else from this repo. If
+you edit them inside this repo instead, CI can fail, because it checks that `run_demo.py` still
+prints `expected/run_demo.txt` and that the three blocks of `attribution.py` the article prints
+still run alone and match the committed copies in `excerpts/`.
 
-1. Capture real spans. Instrument your framework with OpenTelemetry GenAI spans and turn on
-   message content for test runs. In the Python instrumentation that means
+1. Instrument your framework with OpenTelemetry GenAI spans, and turn on message content for
+   test runs, because the checks read tool arguments and messages. In OpenTelemetry's Python
+   GenAI instrumentation packages, set
    `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY` and
-   `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`. Content can hold personal
-   data, which is why it is off by default. In your test, add the SDK's
-   `InMemorySpanExporter` the way `tracing.py` does, run one case, and pass the exporter's
-   `get_finished_spans()` to `steps_from_spans`. It takes the SDK's span objects, so spans
-   saved as JSON or sent to a tracing backend have to be loaded back into that shape first.
-2. Point `steps_from_spans` at your attribute keys by editing `OP`, `AGENT`, `TOOL`, `ARGS`
-   and `RESULT` at the top of `attribution.py`, and pass it the spans of one trace ID at a
-   time. Frameworks differ. Google's ADK, for example, writes tool arguments and results
-   under `gcp.vertex.agent.tool_call_args` and `gcp.vertex.agent.tool_response`.
-3. Record handoffs the way the code reads them. The conventions have no standard handoff
-   event yet, so this harness reads each handoff from a span event named `agent.message`,
-   with `from`, `to` and `content` attributes, where `content` holds the facts as JSON. Find
-   how your framework records a handoff (often as a tool call) and turn it into that event.
-4. Write down what your system must do: a short reference path per agent (`REFS` in
-   `run_demo.py`), the facts each receiving agent needs (`NEEDS` in `attribution.py`), a rule
-   for each tool argument (`ARG_POLICY` in `scorers.py`), your end-state rules (`end_state`
-   in `scorers.py`), and the rules `blame` checks on each tool call (`money_rule` in
-   `attribution.py`). As shipped, `money_rule` knows one rule, approval before a refund, so
-   replace it with yours or `blame` will find only handoff gaps.
+   `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`. If your framework has no such
+   package, create the spans by hand the way `agents.py` does.
+
+   In your test, add the SDK's `InMemorySpanExporter` the way `tracing.py` does, run one test
+   case, and pass the exporter's `get_finished_spans()` to `steps_from_spans`. That function
+   takes the SDK's span objects. If you saved the spans as JSON or sent them to a tracing
+   backend, load them back as SDK span objects first.
+2. In your copy of `attribution.py`, change `OP`, `AGENT`, `TOOL`, `ARGS` and `RESULT` to your
+   framework's attribute keys. Frameworks name these keys differently. Google's ADK, for
+   example, writes tool arguments and results under `gcp.vertex.agent.tool_call_args` and
+   `gcp.vertex.agent.tool_response`. Then pass `steps_from_spans` the spans of one run at a
+   time, which means one trace ID.
+3. Record every message between agents, replies as well as handoffs, because `blame` learns
+   what a sender knew from the messages that reached it. If you leave out the policy agent's
+   reply at step 5, `blame` finds that `amount`, `email` and `needs_approval` never reached the
+   orchestrator, and it names the orchestrator even in the correct run. The GenAI semantic
+   conventions have no standard handoff event yet, so add an `agent.message` span event
+   wherever your framework passes work to another agent or returns a reply. In many frameworks
+   a handoff is a tool call and the reply is that tool's result. Give the event `from`, `to`
+   and `content` attributes, with the facts as JSON in `content`. `_message_event` in
+   `agents.py` does this with a single `span.add_event` call.
+4. Write down what your system must do, in these tables and functions:
+   - a short reference list for each agent, like `REFS` in `run_demo.py`
+   - the facts each receiving agent needs, in `NEEDS` in `attribution.py`
+   - a rule for each tool argument, set to compare, judge or ignore, in `ARG_POLICY` in
+     `scorers.py`. An argument you do not list there must match exactly.
+   - your database rules, in `end_state` in `scorers.py`
+   - the rules `blame` checks on each tool call, in `money_rule` in `attribution.py`
+
+   The `money_rule` in this repo looks only at `request_approval` and `issue_refund` calls.
+   Unless you write your own rules into it, `blame` finds only handoffs that drop or change a
+   fact.
 
    ![Two calls from the failing run with a rule per argument, and three ways of scoring arguments on two cases. Only a rule for each argument gets both right](assets/argument-rules.png)
 
-5. Test the matcher and the judge. If you change `in_order` or bring your own matcher, copy
-   the two trap runs from `traps()` in `run_demo.py` and confirm your matcher fails both.
-   Before a real model judge replaces `stub_judge` in a build gate, compare its verdicts with
-   runs you labelled yourself.
-6. Run each case several times, and report pass^k (`passk.py`) next to the pass rate.
-7. When a case fails, find the first wrong step and replay it with the suspect fact
-   restored, then fix one thing. Add two tests to CI: the recorded bad run must still get a
-   FAIL from the checks, and the fixed system must pass every repeated run.
+5. If you change `in_order` or write your own matcher, copy the two trap runs from `traps()` in
+   `run_demo.py` and confirm your matcher fails both. Before you let a model judge replace
+   `stub_judge` in a check that can fail your CI, compare its verdicts with runs you labelled
+   yourself.
+6. Run each case several times. Report pass^k from `passk.py` next to the plain pass rate,
+   which is 5 of 8 here.
+7. When the first wrong step is a handoff, replay that step. Run the receiving agent alone on
+   fresh data, and give it the recorded handoff with the missing or changed fact put back. The
+   replay in this repo, `replay_check` in `run_demo.py`, works only for the scripted billing
+   agent. For your own agents you need to write one. Then fix one thing and add two tests to
+   CI. The recorded bad run must still get a FAIL from the checks, and the fixed system must
+   pass every repeated run.
 
-![The diagnosis loop: capture spans, rebuild the steps, find the first wrong step, blame its owner, name it, replay, then fix one thing and add two tests to CI](assets/diagnosis-loop.png)
+![The diagnosis loop. Capture spans, rebuild the steps, find the first wrong step, blame its owner, name it, replay the suspect step, then fix one thing and add two tests to CI](assets/diagnosis-loop.png)
 
-Step 5 of that loop names the failure with a [MAST](https://arxiv.org/abs/2503.13657) failure
-mode, such as information withholding or ignoring another agent's input, so you can count how
-often each kind comes back.
+The code in this repo runs boxes 1 to 4 of this loop, and item 7 above covers boxes 6 and 7.
+Box 5 has no code. You name the failure by hand, with a failure mode from
+[MAST](https://arxiv.org/abs/2503.13657), a study that sorts multi-agent failures into named
+modes such as information withholding or ignoring another agent's input. Once failures have
+names, you can count how often each kind comes back.
 
 ## Files
 
@@ -205,25 +258,23 @@ often each kind comes back.
 | `excerpts/` | The three code blocks `check_excerpts.py` pulls out, one file each. CI fails if they drift |
 | `expected/` | The output both scripts print, to diff against |
 
-Every run writes its spans to `traces/`. Span IDs are random and span timestamps come from
-the real clock (only the database uses the fake one), so the trace files change each time and
-are not committed.
+The demo also writes the spans of runs A, B and C to `traces/`. The repo does not commit these
+files. Span IDs are random and timestamps come from the real clock, so the files change on every
+run.
 
 ## Limits
 
-The agents are scripted stand-ins that replay fixed steps, so every verdict repeats exactly.
-Because no model runs, the harness shows what the checks catch but cannot say how often a
-real model fails them. Run the checks on your own system to find that out.
+The agents are scripted stand-ins that take the same steps on every run, so the demo cannot
+tell you how often a real model fails these checks. Run the checks on your own system to find
+out.
 
-The OpenTelemetry GenAI conventions are still marked Development. This harness names its
-handoff event `agent.message`, which is not part of the spec.
+OpenTelemetry still marks the GenAI semantic conventions as Development, its label for parts
+that can change.
 
-`blame` checks two rules: every handoff carries the facts the receiver needs, and approval
-comes before money moves. A failure with no rule written for it gets no blame from code.
-Asking a model to assign blame does not solve this yet either. In the
-[Who&When](https://arxiv.org/abs/2505.00212) study, which tested methods for naming the agent
-behind a multi-agent failure, the best one named the right agent 53.5% of the time. Write a
-rule for each failure you need blamed.
+`blame` names no one when the failure is not a wrong handoff or a broken `money_rule` rule. If
+you ask a model to assign the blame instead, it often picks the wrong agent. In the
+[Who&When](https://arxiv.org/abs/2505.00212) study, the best method for finding the agent
+behind a multi-agent failure named the right agent 53.5% of the time.
 
 ## Further reading
 

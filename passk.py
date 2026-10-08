@@ -1,15 +1,20 @@
-"""pass^k: the chance that ALL k tries of a task succeed.
+"""Score repeated tries of a task with pass^k and pass@k.
 
-Estimator from tau-bench (Yao et al., 2024, arXiv:2406.12045): with n
-recorded tries of a task and c successes, pass^k = C(c, k) / C(n, k),
-averaged over tasks. Compare pass@k = 1 - C(n - c, k) / C(n, k), the
-chance that AT LEAST ONE of k tries succeeds.
+pass^k is the chance that all k tries of a task succeed. pass@k is the
+chance that at least one of the k tries succeeds. For a task with n
+recorded tries and c successes, the tau-bench paper (Yao et al., 2024,
+arXiv:2406.12045) estimates pass^k as C(c, k) / C(n, k). For pass@k the
+estimate is 1 - C(n - c, k) / C(n, k). Both functions average their
+scores over tasks.
 """
 from math import comb
 
 
 def pass_hat_k(results_per_task, k):
-    """results_per_task: list of lists of booleans, one list per task."""
+    """Return pass^k averaged over tasks.
+
+    results_per_task holds one list of booleans per task.
+    """
     scores = []
     for results in results_per_task:
         n, c = len(results), sum(results)

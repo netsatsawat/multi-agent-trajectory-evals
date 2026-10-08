@@ -1,8 +1,11 @@
-"""Pull the article excerpts out of the source, lint them, run them alone.
+"""Check that the code blocks the article prints still run on their own.
 
-Rules for an excerpt: 30 lines or less, 65 characters or less per line,
-no blank lines. Each excerpt is exec'd in a fresh namespace that holds
-only the earlier excerpts, so it runs as printed, not via the harness.
+The article's code blocks, called excerpts here, are in attribution.py.
+This script pulls each one out, checks its size, writes it to
+excerpts/excerpt_N.py and runs it. An excerpt must fit in 30 lines of
+65 characters or less, with no blank lines. Each one runs in a fresh
+namespace that holds only the excerpts before it, so an excerpt fails
+here if it needs a name that only the harness defines.
 """
 import re
 from pathlib import Path
@@ -33,7 +36,7 @@ def lint(n, code):
 
 
 def run_excerpt(n, code, ns):
-    """Exec one excerpt into ns. ns holds only earlier excerpts."""
+    """Run one excerpt inside ns and print the names it defines."""
     names_before = set(ns)
     exec(compile(code, f"excerpt_{n}", "exec"), ns)
     new = sorted(k for k in set(ns) - names_before
@@ -49,14 +52,15 @@ def main():
     for n, code in enumerate(blocks, 1):
         Path(f"excerpts/excerpt_{n}.py").write_text(code + "\n")
 
-    # Real OpenTelemetry spans from the three-agent system.
+    # Record real OpenTelemetry spans from three runs of the agents.
     _, _, bad = A.run_system(A.REQUEST_A, A.HANDOFF_DROPS_FLAG, "x1")
     _, _, good = A.run_system(A.REQUEST_B, A.HANDOFF_COMPLETE, "x2")
     _, _, ctrl = A.run_system(A.REQUEST_B, A.HANDOFF_COMPLETE, "x3",
                               heeds_approval_flag=False)
 
     ns = {}
-    # Excerpt 1 alone: owners from the span tree, time order.
+    # Excerpt 1 runs alone. It rebuilds the steps in time order and
+    # tags each step with the agent that owns it.
     run_excerpt(1, blocks[0], ns)
     steps = ns["steps_from_spans"](bad)
     who = [(s["agent"], s.get("tool") or "msg->" + s["to"])
@@ -66,7 +70,7 @@ def main():
     assert who[6] == (A.BILLING, "issue_refund")
     assert len(steps) == 11
 
-    # Excerpt 2 with only excerpt 1 before it: the handoff check.
+    # Excerpt 2 runs with only excerpt 1 before it and checks handoffs.
     run_excerpt(2, blocks[1], ns)
     handoff = steps[5]
     known = {**steps[4]["facts"]}      # what policy told the orchestrator
@@ -78,7 +82,7 @@ def main():
     print(f"excerpt 2  handoff_gaps(correct handoff) -> {gaps}")
     assert gaps == []
 
-    # Excerpt 3 with excerpts 1 and 2 before it: blame.
+    # Excerpt 3 runs with excerpts 1 and 2 before it and assigns blame.
     run_excerpt(3, blocks[2], ns)
     cause, symptom = ns["blame"](steps)
     print(f"excerpt 3  blame(failing run) -> cause {cause}")
@@ -93,7 +97,7 @@ def main():
     print(f"excerpt 3  blame(control: billing ignores the flag) -> {r}")
     assert r[0] == r[1] and r[0][1] == A.BILLING
 
-    # Same answers as the harness module the demo used.
+    # The excerpts must agree with attribution.py, which the demo imports.
     for spans in (bad, good, ctrl):
         mine = ns["blame"](ns["steps_from_spans"](spans))
         theirs = attribution.blame(attribution.steps_from_spans(spans))
