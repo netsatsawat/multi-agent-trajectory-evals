@@ -1,16 +1,17 @@
-"""Record agent runs as OpenTelemetry spans, all in memory.
+"""Record agent runs as OpenTelemetry spans and keep them in memory.
 
 Span and attribute names follow the OpenTelemetry GenAI semantic
 conventions (v1.44.0, status: Development):
-  invoke_agent {gen_ai.agent.name}   one per agent, kind INTERNAL;
-                                     sub-agents nest under the orchestrator
+  invoke_agent {gen_ai.agent.name}   one per agent, kind INTERNAL, with
+                                     sub-agents nested under the orchestrator
   chat {gen_ai.request.model}        one per model turn
   execute_tool {gen_ai.tool.name}    one per tool call, kind INTERNAL
-Messages that cross between agents are span events named
-"agent.message" (from, to, content as JSON) and are mirrored into the
-opt-in gen_ai.input.messages / gen_ai.output.messages attributes.
-No exporter talks to the network. Spans land in an InMemorySpanExporter
-and can be written to a local JSON file.
+Each message an agent sends or receives becomes a span event named
+"agent.message", with from, to and content attributes, where content
+holds the facts as JSON. The invoke_agent span also copies the messages
+into the opt-in gen_ai.input.messages and gen_ai.output.messages
+attributes. This module sends nothing over the network. The spans go
+to an InMemorySpanExporter, and save_json writes them to a local file.
 """
 import json
 from pathlib import Path
@@ -27,7 +28,8 @@ _provider = TracerProvider()
 _provider.add_span_processor(SimpleSpanProcessor(EXPORTER))
 TRACER = _provider.get_tracer("refund-harness")
 
-# Attribute keys used below, checked against the installed semconv package.
+# The keys below come from the installed semconv package, so a typo fails
+# at import.
 OP = G.GEN_AI_OPERATION_NAME
 AGENT_NAME = G.GEN_AI_AGENT_NAME
 CONVERSATION_ID = G.GEN_AI_CONVERSATION_ID
@@ -41,11 +43,11 @@ TOOL_ARGS = G.GEN_AI_TOOL_CALL_ARGUMENTS
 TOOL_RESULT = G.GEN_AI_TOOL_CALL_RESULT
 INPUT_MESSAGES = G.GEN_AI_INPUT_MESSAGES
 OUTPUT_MESSAGES = G.GEN_AI_OUTPUT_MESSAGES
-MESSAGE_EVENT = "agent.message"   # custom event name, not in the spec
+MESSAGE_EVENT = "agent.message"   # custom, since the spec has no handoff event
 
 
 def take_spans():
-    """Return the spans finished since the last call, then clear."""
+    """Return the spans finished since the last call and clear the exporter."""
     spans = list(EXPORTER.get_finished_spans())
     EXPORTER.clear()
     return spans

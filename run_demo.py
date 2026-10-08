@@ -1,7 +1,9 @@
-"""Run the multi-agent worked example end to end, print every verdict.
+"""Run the multi-agent worked example end to end and print every verdict.
 
 Usage: .venv/bin/python run_demo.py
-No model, no network, no API key. Traces are written to ./traces/.
+
+The demo needs no model, network or API key. It writes the spans of
+runs A, B and C to ./traces/.
 """
 import json
 import random
@@ -15,8 +17,9 @@ from traps import greedy_in_order, naive_contains_all
 
 OID, AMOUNT = A.ORDER, 450
 
-# One reference path per agent. The orchestrator's 'calls' are its
-# delegations; the other two agents' calls are their tool calls.
+# One reference path per agent. For policy and billing the path is their
+# tool calls. The orchestrator has no tools, so its path is the two
+# agents it delegates to, written as 'delegate' calls.
 REFS = {
     A.ORCH: [{"tool": "delegate", "args": {"to": A.POLICY}},
              {"tool": "delegate", "args": {"to": A.BILLING}}],
@@ -47,7 +50,7 @@ def fmt_args(d):
 # ---- printing the trace --------------------------------------------------
 
 def print_tree(spans):
-    """Indented span tree, children in start order, with what crossed."""
+    """Print the spans and agent messages as an indented tree in time order."""
     kids = {}
     for s in spans:
         parent = s.parent.span_id if s.parent else None
@@ -92,7 +95,11 @@ def print_steps(steps):
 # ---- scorers that read the steps -----------------------------------------
 
 def calls_by_agent(steps):
-    """Per-agent call lists for the path check."""
+    """Split the steps into one call list per agent for the path check.
+
+    The orchestrator's messages to policy and billing count as its
+    'delegate' calls.
+    """
     out = {A.ORCH: [], A.POLICY: [], A.BILLING: []}
     for st in steps:
         if st["kind"] == "tool":
@@ -119,7 +126,8 @@ def path_checks(steps):
 
 
 def handoff_checks(steps):
-    """Same fact tracking as blame(), printed for every handoff."""
+    """Track facts the way blame() does and print a verdict for each
+    handoff to an agent listed in NEEDS."""
     known, all_ok = {}, True
     for n, st in enumerate(steps, 1):
         if st["kind"] == "tool":
@@ -209,8 +217,11 @@ def score_run(title, request, handoff_keys, trace_file, **kw):
 
 
 def replay_check(steps):
-    """Was billing's refund a symptom? Re-run billing alone with the
-    handoff it got plus the one fact the orchestrator dropped."""
+    """Re-run billing alone with its handoff plus the fact it was missing.
+
+    If billing then asks for approval first, its early refund in the
+    failing run was a symptom of the orchestrator's dropped fact.
+    """
     print("\n=== Replay: billing alone, given the fact it was missing ===")
     known, handoff = {}, None
     for st in steps:

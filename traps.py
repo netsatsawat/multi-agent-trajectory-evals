@@ -1,26 +1,27 @@
-"""Two matcher bugs that let a bad trajectory pass.
+"""Two short matchers with bugs that let a bad trajectory pass.
 
-Both naive matchers below are short and look reasonable. Both return
-True on inputs where the money moved without a valid check.
+They look reasonable, but both return True on a run where money moved
+without a valid check.
 """
 
 
 def naive_contains_all(reference, actual):
-    """'Every reference tool appears somewhere in the run.'
+    """Pass if every reference tool appears somewhere in the run.
 
-    all() over an empty list is True, so an empty reference (a test case
-    whose reference failed to load, or was never written) passes any run.
+    all() of an empty list is True, so an empty reference passes any run.
+    A test case ends up with an empty reference when loading it fails
+    or nobody wrote one.
     """
     names = [c["tool"] for c in actual]
     return all(r["tool"] in names for r in reference)
 
 
 def greedy_in_order(reference, actual):
-    """'Walk the run; advance through the reference on each match.'
+    """Walk the run and move one step through the reference on each match.
 
-    Anything that does not match the next expected step is skipped as
-    noise, including a refund issued before the approval. It also
-    returns True for an empty reference (0 == 0).
+    The matcher skips any call that does not match the next expected
+    step and treats it as noise, even a refund issued before the
+    approval. It also returns True for an empty reference, since 0 == 0.
     """
     i = 0
     for call in actual:

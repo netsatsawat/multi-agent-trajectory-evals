@@ -1,21 +1,24 @@
-"""A made-up three-agent refund system. No model, no network.
+"""A made-up refund system with three agents. It needs no model and no network.
 
-  orchestrator   takes the customer's request, delegates, answers
+  orchestrator   takes the customer's request, delegates it, answers
   policy-agent   tools: get_order, check_policy
   billing-agent  tools: request_approval, issue_refund, send_email
 
-Every agent is a deterministic stand-in: plain Python that decides from
-the message it was handed, so every score in this harness comes from
-the scoring code, not from a model. All tools write to one in-memory
-SQLite database with a shared fake clock.
+Each agent is a scripted stand-in for a real one. It is plain Python
+that decides from the message it receives and does the same thing on
+every run. Because no model runs, every score in this harness comes
+from the scoring code. The tools share one in-memory SQLite database,
+and billing's tools stamp the rows they write with a fake clock.
 
-Business rule: approval before the money moves. issue_refund does NOT
-enforce it, the way many real tool backends do not.
+The business rule says approval comes before any money moves.
+issue_refund does not check it, and many real tool backends do not
+check it either.
 
-Billing's own instructions (the stand-in's 'prompt'): if the task says
-approval is needed, get it first; otherwise refund, then file an
-approval record for the audit trail. So billing's behaviour depends on
-what the orchestrator's handoff tells it.
+Billing follows a fixed instruction in place of a prompt. If the task
+says approval is needed, billing asks for it first. Otherwise it
+refunds and then files an approval record for the audit trail. So what
+billing does depends on the orchestrator's handoff, the message that
+passes the work to billing.
 """
 import json
 import sqlite3
@@ -26,8 +29,8 @@ from opentelemetry.trace import SpanKind
 import tracing as T
 
 ORCH, POLICY, BILLING = "orchestrator", "policy-agent", "billing-agent"
-MODEL_NAME = "scripted-stand-in"   # not a model: deterministic code
-PROVIDER_NAME = "local.scripted"   # custom value, allowed by the spec
+MODEL_NAME = "scripted-stand-in"   # names the scripted code (no model runs)
+PROVIDER_NAME = "local.scripted"   # the spec allows custom values here
 APPROVAL_LIMIT = 100               # refunds above this need approval
 
 SCHEMA = """
@@ -43,7 +46,8 @@ REFUNDABLE_REASONS = {"damaged", "broken", "defective", "wrong item"}
 
 
 class Clock:
-    """Fake clock, one second per tick, so timestamps are repeatable."""
+    """A fake clock. Each now() call adds one second, so every run
+    writes the same timestamps."""
 
     def __init__(self):
         self.t = datetime(2026, 10, 7, 9, 0, 0)
@@ -106,7 +110,10 @@ TOOLS_BY_AGENT = {
 # ---- tracing helpers -----------------------------------------------------
 
 def _as_messages(role, facts, finish=None):
-    """Semconv-shaped message list, content kept as a JSON text part."""
+    """Return a one-message GenAI message list as a JSON string.
+
+    The message's only text part holds the facts as JSON.
+    """
     msg = {"role": role,
            "parts": [{"type": "text", "content": json.dumps(facts)}]}
     if finish:
@@ -115,13 +122,13 @@ def _as_messages(role, facts, finish=None):
 
 
 def _message_event(span, sender, receiver, facts):
-    """Record what crossed between two agents, as a span event."""
+    """Record one message an agent sends or receives as a span event."""
     span.add_event(T.MESSAGE_EVENT, {
         "from": sender, "to": receiver, "content": json.dumps(facts)})
 
 
 class Run:
-    """One run of the whole system: one DB, one clock, one trace."""
+    """One run, with its own database and clock. Its spans form one trace."""
 
     def __init__(self, conversation_id):
         self.db, self.clock = new_db(), Clock()
@@ -129,7 +136,8 @@ class Run:
         self.n_calls = 0
 
     def chat(self, finish):
-        """A model turn. The stand-in has no tokens or messages."""
+        """Record a model turn as a chat span. The stand-in has no tokens
+        or messages to put on it."""
         with T.TRACER.start_as_current_span(
                 f"chat {MODEL_NAME}", kind=SpanKind.CLIENT,
                 attributes={T.OP: "chat", T.PROVIDER: PROVIDER_NAME,
@@ -137,7 +145,7 @@ class Run:
             pass
 
     def tool(self, agent, name, **args):
-        """One model turn that picks the tool, then the tool call."""
+        """Record the model turn that picks the tool, then run the tool."""
         self.chat("tool_call")
         self.n_calls += 1
         with T.TRACER.start_as_current_span(
@@ -147,17 +155,19 @@ class Run:
                             T.TOOL_TYPE: "function",
                             T.AGENT_NAME: agent,
                             T.CONVERSATION_ID: self.conv,
-                            # Opt-in content attributes, kept as JSON.
+                            # The spec makes tool args and results opt-in.
+                            # We store both as JSON.
                             T.TOOL_ARGS: json.dumps(args)}) as span:
             result = TOOLS_BY_AGENT[agent][name](self.db, self.clock, **args)
             span.set_attribute(T.TOOL_RESULT, json.dumps(result))
         return result
 
     def invoke(self, agent, sender, facts, body):
-        """Run `body(facts)` as `agent`, inside its own invoke_agent span.
+        """Run `body(facts)` as `agent` inside its own invoke_agent span.
 
-        The message in (facts) and the reply out are both recorded on
-        this span, so the trace shows exactly what crossed.
+        The span records the incoming facts and the agent's reply, both
+        as events and as message attributes, so the trace shows exactly
+        what each agent received and sent back.
         """
         with T.TRACER.start_as_current_span(
                 f"invoke_agent {agent}", kind=SpanKind.INTERNAL,
@@ -207,22 +217,22 @@ def run_system(customer_request, handoff_keys, conversation_id,
                heeds_approval_flag=True):
     """Run the orchestrator end to end. Returns (db, answer, spans).
 
-    `handoff_keys` decides which facts the orchestrator copies from the
-    policy agent's reply into its handoff to billing. Dropping one is
-    the bug this harness is about.
+    `handoff_keys` lists the facts the orchestrator copies from the
+    policy agent's reply into its handoff to billing. In the failing
+    run the list leaves out needs_approval.
     """
     run = Run(conversation_id)
     billing = make_billing_agent(heeds_approval_flag)
 
     def orchestrator(req):
-        run.chat("tool_call")              # decide: ask policy first
+        run.chat("tool_call")              # decides to ask policy first
         verdict = run.invoke(POLICY, ORCH,
                              {"order_id": req["order_id"],
                               "reason": req["reason"]},
                              lambda t: policy_agent(run, t))
         if not verdict["refundable"]:
             return {"answer": "Sorry, this order is not refundable."}
-        run.chat("tool_call")              # decide: hand off to billing
+        run.chat("tool_call")              # decides to hand off to billing
         handoff = {k: verdict[k] for k in handoff_keys}
         done = run.invoke(BILLING, ORCH, handoff,
                           lambda t: billing(run, t))
@@ -235,7 +245,7 @@ def run_system(customer_request, handoff_keys, conversation_id,
 
 
 def replay_billing(task, conversation_id):
-    """Run billing alone on a given handoff, on a fresh database."""
+    """Run billing alone on the given handoff, with a fresh database."""
     run = Run(conversation_id)
     run.invoke(BILLING, ORCH, task,
                lambda t: make_billing_agent()(run, t))
@@ -251,7 +261,7 @@ REQUEST_A = {"order_id": ORDER, "reason": "broken",
 REQUEST_B = {"order_id": ORDER, "reason": "damaged",
              "text": "Order A-1001 arrived damaged, photo attached."}
 
-# The failing orchestrator summarises the policy reply and drops the
-# approval flag. The correct one passes it on.
+# In the failing run the orchestrator summarises the policy reply and
+# leaves out the approval flag. In the correct run it passes the flag on.
 HANDOFF_DROPS_FLAG = ["order_id", "amount", "email", "refundable"]
 HANDOFF_COMPLETE = HANDOFF_DROPS_FLAG + ["needs_approval"]

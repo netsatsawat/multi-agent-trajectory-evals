@@ -1,7 +1,8 @@
-"""Walk a multi-agent trace and say which agent's step went wrong first.
+"""Find the first wrong step in a multi-agent trace and the agent that owns it.
 
-Blocks between '# >>> excerpt N' and '# <<< excerpt' are the code the
-article prints. check_excerpts.py extracts them and runs them alone.
+The article prints the code between '# >>> excerpt N' and '# <<< excerpt'
+word for word. check_excerpts.py pulls those blocks out and runs them
+apart from the rest of the harness.
 """
 
 # >>> excerpt 1
