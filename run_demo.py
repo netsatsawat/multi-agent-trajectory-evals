@@ -209,7 +209,8 @@ def score_run(title, request, handoff_keys, trace_file, **kw):
     print("-- grade 2: each handoff"
           " (does each fact the next agent needs cross?) --")
     handoff_checks(steps)
-    print("-- grade 3: the customer's intention --")
+    print("-- grade 3: the outcome,"
+          " checked against the customer's intention --")
     ok, why = S.final_answer_check(answer_in_trace, [OID, str(AMOUNT)])
     line("reply names order and amount", ok, why)
     print("-- failure attribution (walk the tree in time order) --")
@@ -277,13 +278,14 @@ def traps():
 
 def system_passes(db, steps):
     """True when a run passes all three grades: each agent's path with
-    billing's tool check, each handoff, and the customer's intention."""
+    billing's tool check, each handoff, and the outcome checked against
+    the customer's intention."""
     paths = all(S.in_order(REFS[a], c, S.stub_judge)[0]
                 for a, c in calls_by_agent(steps).items())
     tools = all(c[1] for c in S.end_state(db, OID, AMOUNT))
-    intent = S.final_answer_check(final_answer_from(steps),
-                                  [OID, str(AMOUNT)])[0]
-    return paths and tools and intent and blame(steps)[0] is None
+    outcome_ok = S.final_answer_check(final_answer_from(steps),
+                                      [OID, str(AMOUNT)])[0]
+    return paths and tools and outcome_ok and blame(steps)[0] is None
 
 
 def repeated_runs(n=8, seed=2026, p_bad=0.25):
