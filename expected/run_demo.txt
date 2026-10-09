@@ -40,21 +40,21 @@ steps rebuilt from the spans, in time order:
   10. [billing-agent] message to orchestrator: {"order_id": "A-1001", "refunded": 450}
   11. [orchestrator] message to customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
 final answer: "Your refund of $450 for order A-1001 has been issued."
--- per-agent path (in-order, per-argument policy) --
+-- grade 1: each agent's path (in order, a rule per argument) --
   orchestrator path             PASS  2 of 2 in order  [delegate->policy-agent, delegate->billing-agent]
   policy-agent path             PASS  2 of 2 in order  [get_order, check_policy]
   billing-agent path            FAIL  step 1: got issue_refund, want request_approval  [issue_refund, request_approval, send_email]
   judge (stub) on reason: 'broken' vs 'damaged' -> same meaning
--- handoffs (does each fact the next agent needs cross?) --
-  orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
-  orchestrator -> billing-agent FAIL  step 6: needs_approval: knew True, sent '<missing>'
--- whole-system end state in SQLite --
+-- grade 1, billing's tools: what they wrote to SQLite --
   one refund row of 450         PASS  refunds=[450]
   one approval row of 450       PASS  approvals=[450]
   approval before refund        FAIL  approval 09:00:02, refund 09:00:01
   order status is refunded      PASS  status=refunded
--- final answer --
-  names the order and amount    PASS  mentions A-1001, 450
+-- grade 2: each handoff (does each fact the next agent needs cross?) --
+  orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
+  orchestrator -> billing-agent FAIL  step 6: needs_approval: knew True, sent '<missing>'
+-- grade 3: the customer's intention --
+  reply names order and amount  PASS  mentions A-1001, 450
 -- failure attribution (walk the tree in time order) --
   first wrong step: step 6, owner orchestrator, handoff to billing-agent
     - needs_approval: knew True, sent '<missing>'
@@ -109,21 +109,21 @@ steps rebuilt from the spans, in time order:
   10. [billing-agent] message to orchestrator: {"order_id": "A-1001", "refunded": 450}
   11. [orchestrator] message to customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
 final answer: "Your refund of $450 for order A-1001 has been issued."
--- per-agent path (in-order, per-argument policy) --
+-- grade 1: each agent's path (in order, a rule per argument) --
   orchestrator path             PASS  2 of 2 in order  [delegate->policy-agent, delegate->billing-agent]
   policy-agent path             PASS  2 of 2 in order  [get_order, check_policy]
   billing-agent path            PASS  2 of 2 in order  [request_approval, issue_refund, send_email]
   judge (stub) on reason: 'damaged' vs 'damaged' -> same meaning
--- handoffs (does each fact the next agent needs cross?) --
-  orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
-  orchestrator -> billing-agent PASS  step 6: carries order_id, amount, email, needs_approval
--- whole-system end state in SQLite --
+-- grade 1, billing's tools: what they wrote to SQLite --
   one refund row of 450         PASS  refunds=[450]
   one approval row of 450       PASS  approvals=[450]
   approval before refund        PASS  approval 09:00:01, refund 09:00:02
   order status is refunded      PASS  status=refunded
--- final answer --
-  names the order and amount    PASS  mentions A-1001, 450
+-- grade 2: each handoff (does each fact the next agent needs cross?) --
+  orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
+  orchestrator -> billing-agent PASS  step 6: carries order_id, amount, email, needs_approval
+-- grade 3: the customer's intention --
+  reply names order and amount  PASS  mentions A-1001, 450
 -- failure attribution (walk the tree in time order) --
   none: every handoff carries what the next agent needs, and no rule is broken
 
@@ -168,21 +168,21 @@ steps rebuilt from the spans, in time order:
   10. [billing-agent] message to orchestrator: {"order_id": "A-1001", "refunded": 450}
   11. [orchestrator] message to customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
 final answer: "Your refund of $450 for order A-1001 has been issued."
--- per-agent path (in-order, per-argument policy) --
+-- grade 1: each agent's path (in order, a rule per argument) --
   orchestrator path             PASS  2 of 2 in order  [delegate->policy-agent, delegate->billing-agent]
   policy-agent path             PASS  2 of 2 in order  [get_order, check_policy]
   billing-agent path            FAIL  step 1: got issue_refund, want request_approval  [issue_refund, request_approval, send_email]
   judge (stub) on reason: 'damaged' vs 'damaged' -> same meaning
--- handoffs (does each fact the next agent needs cross?) --
-  orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
-  orchestrator -> billing-agent PASS  step 6: carries order_id, amount, email, needs_approval
--- whole-system end state in SQLite --
+-- grade 1, billing's tools: what they wrote to SQLite --
   one refund row of 450         PASS  refunds=[450]
   one approval row of 450       PASS  approvals=[450]
   approval before refund        FAIL  approval 09:00:02, refund 09:00:01
   order status is refunded      PASS  status=refunded
--- final answer --
-  names the order and amount    PASS  mentions A-1001, 450
+-- grade 2: each handoff (does each fact the next agent needs cross?) --
+  orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
+  orchestrator -> billing-agent PASS  step 6: carries order_id, amount, email, needs_approval
+-- grade 3: the customer's intention --
+  reply names order and amount  PASS  mentions A-1001, 450
 -- failure attribution (walk the tree in time order) --
   first wrong step: step 7, owner billing-agent, issue_refund
     - refund before approval
@@ -202,7 +202,7 @@ Trap 2: reference approve, refund. Run refund, approve, refund.
 
 === pass^k over 8 repeated runs ===
 Stand-in for a flaky orchestrator: each run drops the approval flag from the billing handoff with probability 0.25 (random.Random(2026)).
-run results (P = every path, handoff, end-state check passes): F P P P F F P P
+run results (P = all three grades pass): F P P P F F P P
 c = 5 passes out of n = 8
   k=1:  pass^k = 0.625   pass@k = 0.625
   k=2:  pass^k = 0.357   pass@k = 0.893

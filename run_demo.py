@@ -198,19 +198,20 @@ def score_run(title, request, handoff_keys, trace_file, **kw):
     print(f'final answer: "{answer}"')
 
     S.JUDGE_LOG.clear()
-    print("-- per-agent path (in-order, per-argument policy) --")
+    print("-- grade 1: each agent's path (in order, a rule per argument) --")
     path_checks(steps)
     for name, got, want, jok in sorted(set(S.JUDGE_LOG)):
         print(f"  judge (stub) on {name}: {got!r} vs {want!r} -> "
               f"{'same meaning' if jok else 'different'}")
-    print("-- handoffs (does each fact the next agent needs cross?) --")
-    handoff_checks(steps)
-    print("-- whole-system end state in SQLite --")
+    print("-- grade 1, billing's tools: what they wrote to SQLite --")
     for label, ok, detail in S.end_state(db, OID, AMOUNT):
         line(label, ok, detail)
-    print("-- final answer --")
-    ok, why = S.final_answer_check(answer, [OID, str(AMOUNT)])
-    line("names the order and amount", ok, why)
+    print("-- grade 2: each handoff"
+          " (does each fact the next agent needs cross?) --")
+    handoff_checks(steps)
+    print("-- grade 3: the customer's intention --")
+    ok, why = S.final_answer_check(answer_in_trace, [OID, str(AMOUNT)])
+    line("reply names order and amount", ok, why)
     print("-- failure attribution (walk the tree in time order) --")
     cause, symptom = print_blame(steps)
     return steps, cause, symptom
@@ -275,10 +276,14 @@ def traps():
 
 
 def system_passes(db, steps):
+    """True when a run passes all three grades: each agent's path with
+    billing's tool check, each handoff, and the customer's intention."""
     paths = all(S.in_order(REFS[a], c, S.stub_judge)[0]
                 for a, c in calls_by_agent(steps).items())
-    state = all(c[1] for c in S.end_state(db, OID, AMOUNT))
-    return paths and state and blame(steps)[0] is None
+    tools = all(c[1] for c in S.end_state(db, OID, AMOUNT))
+    intent = S.final_answer_check(final_answer_from(steps),
+                                  [OID, str(AMOUNT)])[0]
+    return paths and tools and intent and blame(steps)[0] is None
 
 
 def repeated_runs(n=8, seed=2026, p_bad=0.25):
@@ -294,8 +299,7 @@ def repeated_runs(n=8, seed=2026, p_bad=0.25):
         db, _, spans = A.run_system(A.REQUEST_B, keys, "conv_rep")
         results.append(system_passes(db, steps_from_spans(spans)))
     marks = " ".join("P" if r else "F" for r in results)
-    print("run results (P = every path, handoff, end-state check passes):"
-          f" {marks}")
+    print(f"run results (P = all three grades pass): {marks}")
     print(f"c = {sum(results)} passes out of n = {n}")
     for k in (1, 2, 4, 8):
         print(f"  k={k}:  pass^k = {pass_hat_k([results], k):.3f}"
