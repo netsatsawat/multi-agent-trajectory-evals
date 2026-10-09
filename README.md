@@ -3,7 +3,8 @@
 [![reproduce](https://github.com/netsatsawat/multi-agent-trajectory-evals/actions/workflows/ci.yml/badge.svg)](https://github.com/netsatsawat/multi-agent-trajectory-evals/actions/workflows/ci.yml)
 
 A test that reads only the final reply can pass a multi-agent run where the money goes out
-before anyone approves it. This repo checks every tool call and every message in the run, then
+before anyone approves it. This repo grades each run on each agent's path with its tool calls,
+on each handoff between agents, and on whether the customer got what they asked for. Then it
 names the agent that caused the failure.
 
 ![A three-agent refund run. The orchestrator leaves the approval flag out of its message to billing. Billing refunds one second before it asks for approval, but a test on the final reply still passes](assets/hero-handoff.gif)
@@ -58,25 +59,25 @@ list the trajectory, the path the agents took. The failing run has 11 steps. At 
 policy agent reports `needs_approval: true` to the orchestrator, at step 6 the orchestrator
 hands off to billing, and billing refunds at step 7 and asks for approval at step 8.
 
-Each run gets four checks. The first two grade the trajectory, and the last two grade the
-outcome.
+Each run gets three grades. The first two check the trajectory, and the third checks the
+outcome from the customer's side, whether the customer got what they asked for.
 
-1. The path check compares each agent's own calls, in order, with a short reference list for
-   that agent in `REFS` in `run_demo.py`. For the orchestrator, the calls are its handoffs, and
-   the check looks only at which agent gets each one. Calls to tools outside the reference list
-   can come in between. Each argument has its own rule. IDs, amounts and email addresses must
-   match exactly, and a free-text reason goes to a judge, which decides whether two texts mean
-   the same thing. Here the judge is `stub_judge` in `scorers.py`, a small table of synonyms
-   that treats "broken" as the same as "damaged", so the demo needs no model.
-2. The handoff check takes each handoff and the facts the receiving agent needs, listed in
-   `NEEDS` in `attribution.py`. It checks that the handoff carries each fact with the value the
-   sender knew by then. A sender knows a fact once the fact reaches it in a message or in the
-   result of its own tool call.
-3. The final-answer check looks for the right order ID and amount in the reply.
-4. The database check reads what the run wrote to the SQLite database, including the order of
-   the writes. It expects one refund row and one approval row for the right amount, the
-   approval written before the refund, and the order marked as refunded. `end_state` in
-   `scorers.py` runs this check, so the figures and the file table call it the end-state check.
+1. Each agent's path. The path check compares each agent's own calls, in order, with a short
+   reference list for that agent in `REFS` in `run_demo.py`. For the orchestrator, the calls are
+   its handoffs, and the check looks only at which agent gets each one. Calls to tools outside
+   the reference list can come in between. Each argument has its own rule. IDs, amounts and
+   email addresses must match exactly, and a free-text reason goes to a judge, which decides
+   whether two texts mean the same thing. Here the judge is `stub_judge` in `scorers.py`, a
+   small table of synonyms that treats "broken" as the same as "damaged", so the demo needs no
+   model. This grade also checks what each tool did. In this refund system, billing's tools
+   write to SQLite, and `end_state` in `scorers.py` expects one approval row, then one refund
+   row, both of 450, and the order marked refunded.
+2. Each handoff. The handoff check takes each handoff and the facts the receiving agent needs,
+   listed in `NEEDS` in `attribution.py`. It checks that the handoff carries each fact with the
+   value the sender knew by then. A sender knows a fact once the fact reaches it in a message
+   or in the result of its own tool call.
+3. The customer's intention. `final_answer_check` in `scorers.py` reads the reply, the last
+   step, and passes it when it names the order, A-1001, and the refund amount, 450.
 
 To find the agent that caused a failure, `blame` in `attribution.py` goes through the steps in
 time order. A handoff is wrong when it fails the handoff check. A tool call is wrong when it
@@ -85,10 +86,11 @@ breaks a rule in `money_rule`, and in this repo the only rule is approval before
 call or sent that message. It also reports the first tool call that broke a rule, and calls it
 a symptom when it comes after the cause.
 
-![The failing run and the correct run scored by every check. In the failing run, billing's path, the handoff to billing and the order of the database writes fail, the final answer passes, and blame goes to the orchestrator at step 6. In the correct run every check passes](assets/scored-run.png)
+![The failing run and the correct run scored by the three grades. In the failing run, billing's path, its approval-before-refund tool check and the handoff to billing fail, the customer's intention passes, and blame goes to the orchestrator at step 6. In the correct run every check passes](assets/scored-run.png)
 
-In the failing run, the handoff check fails at step 6, one step before billing's early refund,
-so `blame` names the orchestrator.
+In the failing run, the customer's intention is met, but billing's path and the handoff to
+billing fail. The handoff fails at step 6, one step before billing's early refund, so `blame`
+names the orchestrator.
 
 ![The handoff check going row by row through the four facts billing needs. Order ID, amount and email arrive unchanged, and needs_approval is missing](assets/handoff-check.gif)
 
@@ -160,8 +162,7 @@ list, and it stops at the first call whose tool is in the reference list but out
 
 The last block runs the refund case eight times. In each run a flaky orchestrator drops the
 flag with a one-in-four chance, and a fixed random seed gives the same eight results every
-time. A run passes when every path, handoff and database check passes. Five of the eight runs
-pass.
+time. A run counts as a pass only when it passes all three grades. Five of the eight runs pass.
 
 Pass^k is the chance that all k runs pass when you pick k of those eight runs at random.
 `passk.py` works it out with tau-bench's formula, C(c, k) / C(n, k). Here n = 8 is the number
@@ -210,10 +211,11 @@ still run alone and match the committed copies in `excerpts/`.
    `agents.py` does this with a single `span.add_event` call.
 4. Write down what your system must do, in these tables and functions:
    - a short reference list for each agent, like `REFS` in `run_demo.py`
-   - the facts each receiving agent needs, in `NEEDS` in `attribution.py`
    - a rule for each tool argument, set to compare, judge or ignore, in `ARG_POLICY` in
      `scorers.py`. An argument you do not list there must match exactly.
-   - your database rules, in `end_state` in `scorers.py`
+   - what each tool must change, in `end_state` in `scorers.py`
+   - the facts each receiving agent needs, in `NEEDS` in `attribution.py`
+   - what the reply must confirm, in `score_run` and `system_passes` in `run_demo.py`
    - the rules `blame` checks on each tool call, in `money_rule` in `attribution.py`
 
    The `money_rule` in this repo looks only at `request_approval` and `issue_refund` calls.
@@ -250,7 +252,7 @@ names, you can count how often each kind comes back.
 | `agents.py` | The three scripted agents, their tools, the shared SQLite database, the fake clock, and the code that records each run as spans |
 | `tracing.py` | OpenTelemetry setup, with spans kept in memory and saved to `traces/` |
 | `attribution.py` | `steps_from_spans`, `handoff_gaps`, `money_rule` and `blame`, printed in the article word for word |
-| `scorers.py` | In-order path matching with a rule per argument, the end-state checks, the final-answer check and the stub judge |
+| `scorers.py` | In-order path matching with a rule per argument, `end_state` for billing's rows, the check on the customer's intention, and the stub judge |
 | `traps.py` | The two short matchers that pass bad runs |
 | `passk.py` | Pass^k and pass@k, with tau-bench's formulas |
 | `run_demo.py` | Runs everything and prints every verdict |
@@ -267,6 +269,10 @@ run.
 The agents are scripted stand-ins that take the same steps on every run, so the demo cannot
 tell you how often a real model fails these checks. Run the checks on your own system to find
 out.
+
+The check on the customer's intention only looks for the order ID and the amount in the reply. A
+reply that names both but turns the refund down still passes, so in your own tests, use a judge
+for this check.
 
 OpenTelemetry still marks the GenAI semantic conventions as Development, its label for parts
 that can change.

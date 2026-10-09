@@ -1,10 +1,11 @@
 """Score an agent's trajectory, the list of tool calls it made.
 
 The scorers are plain Python and need no model or network. The rule
-for each argument and the SQLite end-state check come unchanged from
-the single-agent harness. So does the in-order matcher, which avoids
-the bugs shown in traps.py. In this multi-agent harness, run_demo.py
-runs the in-order matcher once for each agent.
+for each argument and the check on what billing's tools wrote to
+SQLite come unchanged from the single-agent harness. So does the
+in-order matcher, which avoids the bugs shown in traps.py. In this
+multi-agent harness, run_demo.py runs the in-order matcher once for
+each agent.
 """
 import json
 
@@ -140,9 +141,10 @@ def precision_recall(reference, actual, judge):
 
 
 def end_state(db, order_id, amount):
-    """Check the rows the run left in SQLite.
+    """Check the rows billing's tools wrote to SQLite, and their order.
 
-    The check never reads what the agents said.
+    This is part of the tool check on billing's path, so it is specific
+    to this refund system. It never reads what the agents said.
     """
     q = lambda sql: db.execute(sql, (order_id,)).fetchall()
     refunds = q("SELECT amount, ts FROM refunds WHERE order_id = ?")
@@ -167,6 +169,11 @@ def end_state(db, order_id, amount):
 
 
 def final_answer_check(text, must_include):
+    """Check the customer's intention on the reply.
+
+    The reply passes when it names every item in must_include, here
+    the order ID and the refund amount.
+    """
     missing = [m for m in must_include if m not in text]
     return not missing, (f"missing {missing}" if missing
                          else f"mentions {', '.join(must_include)}")
