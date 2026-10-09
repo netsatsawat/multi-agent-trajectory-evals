@@ -5,8 +5,9 @@
 If you have built a multi-agent system, you may have a test that reads only the final reply.
 That test can pass a run where the money went out before anyone approved it. This repo grades
 each run on three things: each agent's path with its tool checks, each handoff between agents
-(a message that passes work from one agent to another), and the customer's intention, which is
-whether the customer got what they asked for. Then it names the agent that caused the failure.
+(a message that passes work from one agent to another), and the outcome, checked against the
+customer's intention. The customer's intention is what the customer wants, and the outcome is
+what the agentic AI system produces. Then the repo names the agent that caused the failure.
 
 ![A three-agent refund run. The orchestrator leaves the approval flag out of its message to billing. Billing refunds one second before it asks for approval, but a test on the final reply still passes](assets/hero-handoff.gif)
 
@@ -27,11 +28,11 @@ it only followed its instruction with the facts it had. If your grader checks on
 whose action looks wrong, it blames billing, and you fix billing while the orchestrator keeps
 dropping the flag.
 
-There is no pip package, so you clone the repo and run its Python files. Since the three
-agents are scripted Python, the demo runs offline with no model and no API key. The path
-check, the handoff check and `blame`, the function that names the agent at fault, all read
-OpenTelemetry spans. A span is the timed record of one agent run, model call or tool call. The
-section [Use it on your own agents](#use-it-on-your-own-agents) shows how to run the same
+There is no pip package, so you clone the repo and run its Python files. Since the three agents
+are scripted Python, the demo runs offline with no model and no API key. `blame` is the
+function that names the agent at fault. It reads OpenTelemetry spans, and so do the path check
+and the handoff check. A span is the timed record of one agent run, model call or tool call.
+The section [Use it on your own agents](#use-it-on-your-own-agents) shows how to run the same
 checks on your system.
 
 I wrote this code for the article *Multi-Agent Trajectory Evaluation, Explained Simply*
@@ -63,7 +64,7 @@ orchestrator hands off to billing, and billing refunds at step 7 and asks for ap
 step 8.
 
 Each run gets three grades. The first two grade the trajectory, and the third grades the
-outcome from the customer's side.
+outcome.
 
 1. Each agent's path, with its tool checks. The path check compares each agent's own calls, in
    order, with a short reference list for that agent in `REFS` in `run_demo.py`. For the
@@ -82,8 +83,11 @@ outcome from the customer's side.
    listed in `NEEDS` in `attribution.py`. It checks that the handoff carries each fact with the
    value the sender knew by then. A sender knows a fact once the fact reaches it in a message
    or in the result of its own tool call.
-3. The customer's intention. `final_answer_check` in `scorers.py` reads the reply, the last
-   step, and passes it when it names the order, A-1001, and the refund amount, 450.
+3. The outcome, checked against the customer's intention. Here the customer's intention is a
+   refund of $450 for order A-1001. The outcome is the reply the customer gets and the refund
+   the system issues. `final_answer_check` in `scorers.py` reads the reply, which is the last
+   step, and passes it when it names the order A-1001 and the amount 450. Billing's tool check
+   in grade 1 already reads the refund row.
 
 Once a run fails, we need to know which agent caused it. `blame` in `attribution.py` goes
 through the steps in time order. A handoff is wrong when it fails the handoff check, and a tool
@@ -92,11 +96,13 @@ before a refund. `blame` takes the first wrong step as the cause and blames its 
 that made that call or sent that message. It also reports the first tool call that broke a
 rule, and calls it a symptom when it comes after the cause.
 
-![The failing run and the correct run scored by the three grades. In the failing run, billing's path, its approval-before-refund tool check and the handoff to billing fail, the customer's intention is met, and blame goes to the orchestrator at step 6. In the correct run every check passes](assets/scored-run.png)
+![The failing run and the correct run scored by the three grades. In the failing run, billing's path, its approval-before-refund tool check and the handoff to billing fail, the outcome matches the customer's intention, and blame goes to the orchestrator at step 6. In the correct run every check passes](assets/scored-run.png)
 
-In the failing run, the customer's intention is met, but billing's path, its
-approval-before-refund check and the handoff to billing all fail. The handoff fails at step 6,
-one step before billing's early refund, so `blame` names the orchestrator.
+In the failing run, the outcome matches the customer's intention, because the customer gets
+the refund and the right reply. However, the run breaks the approval rule, and only the two
+trajectory grades catch that. Billing's path, its approval-before-refund check and the handoff
+to billing all fail. The handoff fails at step 6, one step before billing's early refund, so
+`blame` names the orchestrator.
 
 ![The handoff check going row by row through the four facts billing needs. Order ID, amount and email arrive unchanged, and needs_approval is missing](assets/handoff-check.gif)
 
@@ -222,7 +228,8 @@ repo. If you edit them inside this repo instead, CI can fail, because it checks 
      `scorers.py`. An argument you do not list there must match exactly.
    - what each tool must change, in `end_state` in `scorers.py`
    - the facts each receiving agent needs, in `NEEDS` in `attribution.py`
-   - what the reply must confirm, in `score_run` and `system_passes` in `run_demo.py`
+   - the values the reply must name to match the customer's intention, in `score_run` and
+     `system_passes` in `run_demo.py`
    - the rules `blame` checks on each tool call, in `money_rule` in `attribution.py`
 
    Be careful with `money_rule`, because in this repo it looks only at `request_approval` and
@@ -259,7 +266,7 @@ have names, you can count how often each kind happens.
 | `agents.py` | The three scripted agents, their tools, the shared SQLite database, the fake clock, and the code that records each run as spans |
 | `tracing.py` | OpenTelemetry setup, with spans kept in memory and saved to `traces/` |
 | `attribution.py` | `steps_from_spans`, `handoff_gaps`, `money_rule` and `blame`, printed in the article word for word |
-| `scorers.py` | In-order path matching with a rule per argument, `end_state` for billing's rows, the check on the customer's intention, and the stub judge |
+| `scorers.py` | In-order path matching with a rule per argument, `end_state` for billing's rows, the outcome check against the customer's intention, and the stub judge |
 | `traps.py` | The two common matchers that pass bad runs |
 | `passk.py` | Pass^k and pass@k, with tau-bench's formulas |
 | `run_demo.py` | Runs everything and prints every verdict |
@@ -277,9 +284,9 @@ The agents are scripted stand-ins that take the same steps on every run, so the 
 tell you how often a real model fails these checks. Run the checks on your own system to find
 out.
 
-The check on the customer's intention only looks for the order ID and the amount in the reply.
-A reply that names both but turns the refund down would still pass, so in your own tests, use a
-judge for this check.
+The outcome check only looks for the order ID and the amount in the reply. A reply that names
+both but turns the refund down does not match the customer's intention, yet it would still
+pass, so in your own tests, use a judge for this check.
 
 OpenTelemetry still marks the GenAI semantic conventions as Development, which means they can
 change, so pin the version of your instrumentation.

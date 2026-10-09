@@ -53,7 +53,7 @@ final answer: "Your refund of $450 for order A-1001 has been issued."
 -- grade 2: each handoff (does each fact the next agent needs cross?) --
   orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
   orchestrator -> billing-agent FAIL  step 6: needs_approval: knew True, sent '<missing>'
--- grade 3: the customer's intention --
+-- grade 3: the outcome, checked against the customer's intention --
   reply names order and amount  PASS  mentions A-1001, 450
 -- failure attribution (walk the tree in time order) --
   first wrong step: step 6, owner orchestrator, handoff to billing-agent
@@ -122,7 +122,7 @@ final answer: "Your refund of $450 for order A-1001 has been issued."
 -- grade 2: each handoff (does each fact the next agent needs cross?) --
   orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
   orchestrator -> billing-agent PASS  step 6: carries order_id, amount, email, needs_approval
--- grade 3: the customer's intention --
+-- grade 3: the outcome, checked against the customer's intention --
   reply names order and amount  PASS  mentions A-1001, 450
 -- failure attribution (walk the tree in time order) --
   none: every handoff carries what the next agent needs, and no rule is broken
@@ -181,7 +181,7 @@ final answer: "Your refund of $450 for order A-1001 has been issued."
 -- grade 2: each handoff (does each fact the next agent needs cross?) --
   orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
   orchestrator -> billing-agent PASS  step 6: carries order_id, amount, email, needs_approval
--- grade 3: the customer's intention --
+-- grade 3: the outcome, checked against the customer's intention --
   reply names order and amount  PASS  mentions A-1001, 450
 -- failure attribution (walk the tree in time order) --
   first wrong step: step 7, owner billing-agent, issue_refund

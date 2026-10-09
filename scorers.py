@@ -5,7 +5,9 @@ for each argument and the check on what billing's tools wrote to
 SQLite come unchanged from the single-agent harness. So does the
 in-order matcher, which avoids the bugs shown in traps.py. In this
 multi-agent harness, run_demo.py runs the in-order matcher once for
-each agent.
+each agent. The last function, final_answer_check, grades the outcome
+instead of the trajectory. It checks the outcome against the
+customer's intention.
 """
 import json
 
@@ -169,10 +171,14 @@ def end_state(db, order_id, amount):
 
 
 def final_answer_check(text, must_include):
-    """Check the customer's intention on the reply.
+    """Check the outcome against the customer's intention.
 
-    The reply passes when it names every item in must_include, here
-    the order ID and the refund amount.
+    The customer's intention is what the customer wants, here a refund
+    of $450 for order A-1001. The outcome is what the system produces,
+    and this check reads one part of it, the reply. The reply passes
+    when it names every item in must_include, here the order ID and the
+    refund amount. end_state checks the refund row itself, as part of
+    billing's tool check.
     """
     missing = [m for m in must_include if m not in text]
     return not missing, (f"missing {missing}" if missing
