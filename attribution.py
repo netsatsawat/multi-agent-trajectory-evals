@@ -65,7 +65,7 @@ def money_rule(step, approved):
         if approved.get(a["order_id"], 0) < a["amount"]:
             return "refund before approval"
     return ""
-def blame(steps):
+def attribute_failure(steps):
     """First wrong step (the cause) and first broken rule
     (the symptom), each as (step, agent, what, reasons)."""
     known, approved = {}, {}
@@ -85,3 +85,15 @@ def blame(steps):
         cause = cause or wrong
     return cause, symptom
 # <<< excerpt
+
+
+def first_wrong(*found):
+    """The earliest of several (step, agent, what, reasons) findings.
+
+    attribute_failure() returns its cause in this shape, and so do
+    order_gaps() in sequence.py and wrong_route() in routing.py. The
+    cause of a failed run is the finding with the lowest step number.
+    On a tie, the finding passed in first wins.
+    """
+    found = [f for f in found if f]
+    return min(found, key=lambda f: f[0]) if found else None

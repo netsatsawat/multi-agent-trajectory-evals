@@ -1,10 +1,10 @@
 
 === Run A: the orchestrator drops the approval flag ===
-customer: "My order A-1001 arrived broken. Refund please."
+customer: "My order A-1001 arrived broken. I need a refund."
 trace: 3 invoke_agent, 10 chat, 5 execute_tool spans -> traces/run_a.json
 span tree (the stand-in's chat spans carry no content):
   invoke_agent orchestrator
-    [event agent.message] customer -> orchestrator: {"order_id": "A-1001", "reason": "broken", "text": "My order A-1001 arrived broken. Refund please."}
+    [event agent.message] customer -> orchestrator: {"order_id": "A-1001", "reason": "broken", "text": "My order A-1001 arrived broken. I need a refund."}
     chat scripted-stand-in
     invoke_agent policy-agent
       [event agent.message] orchestrator -> policy-agent: {"order_id": "A-1001", "reason": "broken"}
@@ -28,7 +28,7 @@ span tree (the stand-in's chat spans carry no content):
     chat scripted-stand-in
     [event agent.message] orchestrator -> customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
 steps rebuilt from the spans, in time order:
-   1. [customer] message to orchestrator: {"order_id": "A-1001", "reason": "broken", "text": "My order A-1001 arrived broken. Refund please."}
+   1. [customer] message to orchestrator: {"order_id": "A-1001", "reason": "broken", "text": "My order A-1001 arrived broken. I need a refund."}
    2. [orchestrator] message to policy-agent: {"order_id": "A-1001", "reason": "broken"}
    3. [policy-agent] get_order(order_id='A-1001')
    4. [policy-agent] check_policy(order_id='A-1001', reason='broken')
@@ -41,7 +41,6 @@ steps rebuilt from the spans, in time order:
   11. [orchestrator] message to customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
 final answer: "Your refund of $450 for order A-1001 has been issued."
 -- grade 1: each agent's path (in order, a rule per argument) --
-  orchestrator path             PASS  2 of 2 in order  [delegate->policy-agent, delegate->billing-agent]
   policy-agent path             PASS  2 of 2 in order  [get_order, check_policy]
   billing-agent path            FAIL  step 1: got issue_refund, want request_approval  [issue_refund, request_approval, send_email]
   judge (stub) on reason: 'broken' vs 'damaged' -> same meaning
@@ -50,7 +49,8 @@ final answer: "Your refund of $450 for order A-1001 has been issued."
   one approval row of 450       PASS  approvals=[450]
   approval before refund        FAIL  approval 09:00:02, refund 09:00:01
   order status is refunded      PASS  status=refunded
--- grade 2: each handoff (does each fact the next agent needs cross?) --
+-- grade 2: each handoff (the right agent, and each fact the next agent needs) --
+  route (who got the work)      PASS  step 2: policy-agent, step 6: billing-agent
   orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
   orchestrator -> billing-agent FAIL  step 6: needs_approval: knew True, sent '<missing>'
 -- grade 3: the outcome, checked against the customer's intention --
@@ -59,7 +59,7 @@ final answer: "Your refund of $450 for order A-1001 has been issued."
   first wrong step: step 6, owner orchestrator, handoff to billing-agent
     - needs_approval: knew True, sent '<missing>'
   first broken rule: step 7, by billing-agent, issue_refund (refund before approval)
-  verdict: blame orchestrator (cause, step 6); billing-agent's issue_refund at step 7 is a symptom
+  cause: orchestrator, step 6 (handoff to billing-agent). symptom: billing-agent's issue_refund at step 7
 
 === Replay: billing alone, given the fact it was missing ===
   handoff as sent:     {"order_id": "A-1001", "amount": 450, "email": "kim@example.com", "refundable": true}
@@ -110,7 +110,6 @@ steps rebuilt from the spans, in time order:
   11. [orchestrator] message to customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
 final answer: "Your refund of $450 for order A-1001 has been issued."
 -- grade 1: each agent's path (in order, a rule per argument) --
-  orchestrator path             PASS  2 of 2 in order  [delegate->policy-agent, delegate->billing-agent]
   policy-agent path             PASS  2 of 2 in order  [get_order, check_policy]
   billing-agent path            PASS  2 of 2 in order  [request_approval, issue_refund, send_email]
   judge (stub) on reason: 'damaged' vs 'damaged' -> same meaning
@@ -119,7 +118,8 @@ final answer: "Your refund of $450 for order A-1001 has been issued."
   one approval row of 450       PASS  approvals=[450]
   approval before refund        PASS  approval 09:00:01, refund 09:00:02
   order status is refunded      PASS  status=refunded
--- grade 2: each handoff (does each fact the next agent needs cross?) --
+-- grade 2: each handoff (the right agent, and each fact the next agent needs) --
+  route (who got the work)      PASS  step 2: policy-agent, step 6: billing-agent
   orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
   orchestrator -> billing-agent PASS  step 6: carries order_id, amount, email, needs_approval
 -- grade 3: the outcome, checked against the customer's intention --
@@ -169,7 +169,6 @@ steps rebuilt from the spans, in time order:
   11. [orchestrator] message to customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
 final answer: "Your refund of $450 for order A-1001 has been issued."
 -- grade 1: each agent's path (in order, a rule per argument) --
-  orchestrator path             PASS  2 of 2 in order  [delegate->policy-agent, delegate->billing-agent]
   policy-agent path             PASS  2 of 2 in order  [get_order, check_policy]
   billing-agent path            FAIL  step 1: got issue_refund, want request_approval  [issue_refund, request_approval, send_email]
   judge (stub) on reason: 'damaged' vs 'damaged' -> same meaning
@@ -178,7 +177,8 @@ final answer: "Your refund of $450 for order A-1001 has been issued."
   one approval row of 450       PASS  approvals=[450]
   approval before refund        FAIL  approval 09:00:02, refund 09:00:01
   order status is refunded      PASS  status=refunded
--- grade 2: each handoff (does each fact the next agent needs cross?) --
+-- grade 2: each handoff (the right agent, and each fact the next agent needs) --
+  route (who got the work)      PASS  step 2: policy-agent, step 6: billing-agent
   orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
   orchestrator -> billing-agent PASS  step 6: carries order_id, amount, email, needs_approval
 -- grade 3: the outcome, checked against the customer's intention --
@@ -187,7 +187,7 @@ final answer: "Your refund of $450 for order A-1001 has been issued."
   first wrong step: step 7, owner billing-agent, issue_refund
     - refund before approval
   first broken rule: step 7, by billing-agent, issue_refund (refund before approval)
-  verdict: blame billing-agent; its own action is the first wrong step
+  cause: billing-agent, step 7 (issue_refund). It is also the first broken rule.
 
 === Two matcher traps ===
 Trap 1: the reference list is empty (it failed to load).
