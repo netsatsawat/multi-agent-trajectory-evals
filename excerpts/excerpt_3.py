@@ -7,7 +7,7 @@ def money_rule(step, approved):
         if approved.get(a["order_id"], 0) < a["amount"]:
             return "refund before approval"
     return ""
-def blame(steps):
+def attribute_failure(steps):
     """First wrong step (the cause) and first broken rule
     (the symptom), each as (step, agent, what, reasons)."""
     known, approved = {}, {}

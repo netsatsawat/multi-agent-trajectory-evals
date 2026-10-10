@@ -142,7 +142,7 @@ def precision_recall(reference, actual, judge):
     return matched / len(actual), matched / len(reference), matched, extras
 
 
-def end_state(db, order_id, amount):
+def billing_rows(db, order_id, amount):
     """Check the rows billing's tools wrote to SQLite, and their order.
 
     This is part of the tool check on billing's path, so it is specific
@@ -177,8 +177,8 @@ def final_answer_check(text, must_include):
     of $450 for order A-1001. The outcome is what the system produces,
     and this check reads one part of it, the reply. The reply passes
     when it names every item in must_include, here the order ID and the
-    refund amount. end_state checks the refund row itself, as part of
-    billing's tool check.
+    refund amount. billing_rows checks the refund row itself, as part
+    of billing's tool check.
     """
     missing = [m for m in must_include if m not in text]
     return not missing, (f"missing {missing}" if missing

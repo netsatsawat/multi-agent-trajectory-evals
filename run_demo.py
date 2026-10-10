@@ -11,18 +11,19 @@ import random
 import agents as A
 import scorers as S
 import tracing as T
-from attribution import NEEDS, blame, handoff_gaps, steps_from_spans
+from attribution import (
+    NEEDS, attribute_failure, handoff_gaps, steps_from_spans)
 from passk import pass_at_k, pass_hat_k
+from routing import wrong_route
 from traps import greedy_in_order, naive_contains_all
 
 OID, AMOUNT = A.ORDER, 450
 
-# One reference path per agent. For policy and billing the path is their
-# tool calls. The orchestrator has no tools, so its path is the two
-# agents it delegates to, written as 'delegate' calls.
+# One reference path per agent: the tool calls its rules need, in order.
+# The orchestrator has no tools. Its handoffs are checked in grade 2,
+# where ROUTE lists the agents it must hand the work to.
+ROUTE = [A.POLICY, A.BILLING]
 REFS = {
-    A.ORCH: [{"tool": "delegate", "args": {"to": A.POLICY}},
-             {"tool": "delegate", "args": {"to": A.BILLING}}],
     A.POLICY: [
         {"tool": "get_order", "args": {"order_id": OID}},
         {"tool": "check_policy",
@@ -95,19 +96,13 @@ def print_steps(steps):
 # ---- scorers that read the steps -----------------------------------------
 
 def calls_by_agent(steps):
-    """Split the steps into one call list per agent for the path check.
-
-    The orchestrator's messages to policy and billing count as its
-    'delegate' calls.
-    """
-    out = {A.ORCH: [], A.POLICY: [], A.BILLING: []}
+    """Split the tool steps into one call list per agent for the path
+    check."""
+    out = {}
     for st in steps:
         if st["kind"] == "tool":
-            out[st["agent"]].append(
+            out.setdefault(st["agent"], []).append(
                 {"tool": st["tool"], "args": st["args"]})
-        elif st["agent"] == A.ORCH and st["to"] in REFS:
-            out[A.ORCH].append(
-                {"tool": "delegate", "args": {"to": st["to"]}})
     return out
 
 
@@ -115,19 +110,32 @@ def path_checks(steps):
     per_agent = calls_by_agent(steps)
     results = {}
     for agent, ref in REFS.items():
-        ok, step, why = S.in_order(ref, per_agent[agent], S.stub_judge)
-        tools = ", ".join(c["tool"] if c["tool"] != "delegate"
-                          else f"delegate->{c['args']['to']}"
-                          for c in per_agent[agent])
+        calls = per_agent.get(agent, [])
+        ok, step, why = S.in_order(ref, calls, S.stub_judge)
+        tools = ", ".join(c["tool"] for c in calls)
         detail = f"step {step}: {why}" if step else why
         line(f"{agent} path", ok, f"{detail}  [{tools}]")
         results[agent] = ok
     return results
 
 
+def route_check(steps, want, router=A.ORCH):
+    """Print the routing verdict: did the router hand the work to the
+    agents in `want`, in that order? wrong_route reports a trace step,
+    the same way attribute_failure and order_gaps do."""
+    r = wrong_route(steps, want, router)
+    sent = [f"step {n}: {st['to']}" for n, st in enumerate(steps, 1)
+            if st["kind"] == "message" and st["agent"] == router
+            and st["to"] != "customer"]
+    line("route (who got the work)", r is None,
+         ", ".join(sent) if r is None
+         else f"step {r[0]}: {r[2]}, {r[3][0]}")
+    return r
+
+
 def handoff_checks(steps):
-    """Track facts the way blame() does and print a verdict for each
-    handoff to an agent listed in NEEDS."""
+    """Track facts the way attribute_failure() does and print a verdict
+    for each handoff to an agent listed in NEEDS."""
     known, all_ok = {}, True
     for n, st in enumerate(steps, 1):
         if st["kind"] == "tool":
@@ -152,8 +160,10 @@ def final_answer_from(steps):
     return ""
 
 
-def print_blame(steps):
-    cause, symptom = blame(steps)
+def print_attribution(steps):
+    """Print who caused the failure (the cause) and where it showed
+    (the symptom), in plain words."""
+    cause, symptom = attribute_failure(steps)
     if cause is None:
         print("  none: every handoff carries what the next agent needs,"
               " and no rule is broken")
@@ -166,12 +176,12 @@ def print_blame(steps):
         sn, swho, swhat, sreasons = symptom
         print(f"  first broken rule: step {sn}, by {swho}, {swhat}"
               f" ({'; '.join(sreasons)})")
-        if symptom == cause:
-            print(f"  verdict: blame {who}; its own action is the first"
-                  " wrong step")
-        else:
-            print(f"  verdict: blame {who} (cause, step {n});"
-                  f" {swho}'s {swhat} at step {sn} is a symptom")
+    verdict = f"  cause: {who}, step {n} ({what})."
+    if symptom == cause:
+        verdict += " It is also the first broken rule."
+    elif symptom:
+        verdict += f" symptom: {swho}'s {swhat} at step {sn}"
+    print(verdict)
     return cause, symptom
 
 
@@ -204,17 +214,18 @@ def score_run(title, request, handoff_keys, trace_file, **kw):
         print(f"  judge (stub) on {name}: {got!r} vs {want!r} -> "
               f"{'same meaning' if jok else 'different'}")
     print("-- grade 1, billing's tools: what they wrote to SQLite --")
-    for label, ok, detail in S.end_state(db, OID, AMOUNT):
+    for label, ok, detail in S.billing_rows(db, OID, AMOUNT):
         line(label, ok, detail)
-    print("-- grade 2: each handoff"
-          " (does each fact the next agent needs cross?) --")
+    print("-- grade 2: each handoff (the right agent,"
+          " and each fact the next agent needs) --")
+    route_check(steps, ROUTE)
     handoff_checks(steps)
     print("-- grade 3: the outcome,"
           " checked against the customer's intention --")
     ok, why = S.final_answer_check(answer_in_trace, [OID, str(AMOUNT)])
     line("reply names order and amount", ok, why)
     print("-- failure attribution (walk the tree in time order) --")
-    cause, symptom = print_blame(steps)
+    cause, symptom = print_attribution(steps)
     return steps, cause, symptom
 
 
@@ -241,7 +252,7 @@ def replay_check(steps):
           + ", ".join(c["tool"] for c in calls))
     ok, step, why = S.in_order(REFS[A.BILLING], calls, S.stub_judge)
     line("billing path", ok, why)
-    for label, ok, detail in S.end_state(db, OID, AMOUNT):
+    for label, ok, detail in S.billing_rows(db, OID, AMOUNT):
         if label == "approval before refund":
             line(label, ok, detail)
 
@@ -278,14 +289,17 @@ def traps():
 
 def system_passes(db, steps):
     """True when a run passes all three grades: each agent's path with
-    billing's tool check, each handoff, and the outcome checked against
-    the customer's intention."""
-    paths = all(S.in_order(REFS[a], c, S.stub_judge)[0]
-                for a, c in calls_by_agent(steps).items())
-    tools = all(c[1] for c in S.end_state(db, OID, AMOUNT))
+    billing's tool check, each handoff (the route and the facts), and
+    the outcome checked against the customer's intention."""
+    calls = calls_by_agent(steps)
+    paths = all(S.in_order(ref, calls.get(a, []), S.stub_judge)[0]
+                for a, ref in REFS.items())
+    route_ok = wrong_route(steps, ROUTE) is None
+    tools = all(c[1] for c in S.billing_rows(db, OID, AMOUNT))
     outcome_ok = S.final_answer_check(final_answer_from(steps),
                                       [OID, str(AMOUNT)])[0]
-    return paths and tools and outcome_ok and blame(steps)[0] is None
+    return (paths and route_ok and tools and outcome_ok
+            and attribute_failure(steps)[0] is None)
 
 
 def repeated_runs(n=8, seed=2026, p_bad=0.25):

@@ -57,9 +57,9 @@ class Clock:
         return self.t.strftime("%H:%M:%S")
 
 
-def new_db():
+def new_db(schema=SCHEMA):
     db = sqlite3.connect(":memory:")
-    db.executescript(SCHEMA)
+    db.executescript(schema)
     return db
 
 
@@ -130,8 +130,9 @@ def _message_event(span, sender, receiver, facts):
 class Run:
     """One run, with its own database and clock. Its spans form one trace."""
 
-    def __init__(self, conversation_id):
-        self.db, self.clock = new_db(), Clock()
+    def __init__(self, conversation_id, tools=None, schema=SCHEMA):
+        self.db, self.clock = new_db(schema), Clock()
+        self.tools = tools or TOOLS_BY_AGENT
         self.conv = conversation_id
         self.n_calls = 0
 
@@ -158,7 +159,7 @@ class Run:
                             # The spec makes tool args and results opt-in.
                             # We store both as JSON.
                             T.TOOL_ARGS: json.dumps(args)}) as span:
-            result = TOOLS_BY_AGENT[agent][name](self.db, self.clock, **args)
+            result = self.tools[agent][name](self.db, self.clock, **args)
             span.set_attribute(T.TOOL_RESULT, json.dumps(result))
         return result
 
@@ -257,7 +258,7 @@ def replay_billing(task, conversation_id):
 
 ORDER = "A-1001"
 REQUEST_A = {"order_id": ORDER, "reason": "broken",
-             "text": "My order A-1001 arrived broken. Refund please."}
+             "text": "My order A-1001 arrived broken. I need a refund."}
 REQUEST_B = {"order_id": ORDER, "reason": "damaged",
              "text": "Order A-1001 arrived damaged, photo attached."}
 

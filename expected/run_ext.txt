@@ -1,0 +1,246 @@
+=== Grade 1, tool order: one refund, 7 scripted orders ===
+customer: "My blender B-2002 is broken. I need a refund."
+dependency graph (tool: tools that must succeed before it):
+  check_policy: get_order
+  issue_refund: check_policy, get_payment, request_approval
+  send_receipt: issue_refund
+  log_case: nothing (any time)
+may succeed only once: issue_refund
+no edge, so any order: get_payment and request_approval; log_case anywhere
+
+-- as designed --
+  policy-agent calls: get_order, check_policy
+  billing-agent calls: get_payment, request_approval, issue_refund, send_receipt, log_case
+  reply: "Your refund of $240 for order B-2002 has been issued."
+  exact match (policy-agent)    PASS  all 2 steps identical
+  exact match (billing-agent)   PASS  all 5 steps identical
+  in order (policy-agent)       PASS  2 of 2 in order
+  in order (billing-agent)      PASS  4 of 4 in order
+  dependency graph              PASS  every edge holds
+  one refund of 240, right card PASS  refunds=[(240, 'P1-B-2002')]
+  approval of 240 first         PASS  approval 09:00:01, refund 09:00:02
+  receipt says $240             PASS  outbox=['Receipt: $240 refunded for B-2002.']
+  one case note                 PASS  case_log=['refund case']
+  handoff facts to billing      PASS  step 6: needs_approval=True passed on as policy reported it
+  reply names order and amount  PASS  mentions B-2002, 240
+  cause from the handoff and money rules: none
+  cause with the order check added: none
+
+-- case note logged first --
+  policy-agent calls: get_order, check_policy
+  billing-agent calls: log_case, get_payment, request_approval, issue_refund, send_receipt
+  reply: "Your refund of $240 for order B-2002 has been issued."
+  exact match (policy-agent)    PASS  all 2 steps identical
+  exact match (billing-agent)   FAIL  step 1: tool log_case != get_payment
+  in order (policy-agent)       PASS  2 of 2 in order
+  in order (billing-agent)      FAIL  step 1: got log_case, want request_approval
+  dependency graph              PASS  every edge holds
+  one refund of 240, right card PASS  refunds=[(240, 'P1-B-2002')]
+  approval of 240 first         PASS  approval 09:00:02, refund 09:00:03
+  receipt says $240             PASS  outbox=['Receipt: $240 refunded for B-2002.']
+  one case note                 PASS  case_log=['refund case']
+  handoff facts to billing      PASS  step 6: needs_approval=True passed on as policy reported it
+  reply names order and amount  PASS  mentions B-2002, 240
+  cause from the handoff and money rules: none
+  cause with the order check added: none
+
+-- refund before approval --
+  policy-agent calls: get_order, check_policy
+  billing-agent calls: get_payment, issue_refund, request_approval, send_receipt, log_case
+  reply: "Your refund of $240 for order B-2002 has been issued."
+  exact match (policy-agent)    PASS  all 2 steps identical
+  exact match (billing-agent)   FAIL  step 2: tool issue_refund != request_approval
+  in order (policy-agent)       PASS  2 of 2 in order
+  in order (billing-agent)      FAIL  step 2: got issue_refund, want request_approval
+  dependency graph              FAIL  step 8: issue_refund ran before request_approval succeeded
+  one refund of 240, right card PASS  refunds=[(240, 'P1-B-2002')]
+  approval of 240 first         FAIL  approval 09:00:02, refund 09:00:01
+  receipt says $240             PASS  outbox=['Receipt: $240 refunded for B-2002.']
+  one case note                 PASS  case_log=['refund case']
+  handoff facts to billing      PASS  step 6: needs_approval=True passed on as policy reported it
+  reply names order and amount  PASS  mentions B-2002, 240
+  cause from the handoff and money rules: billing-agent, step 8 (issue_refund)
+  cause with the order check added: billing-agent, step 8 (issue_refund)
+
+-- receipt before refund --
+  policy-agent calls: get_order, check_policy
+  billing-agent calls: get_payment, request_approval, send_receipt, issue_refund, log_case
+  reply: "Your refund of $240 for order B-2002 has been issued."
+  exact match (policy-agent)    PASS  all 2 steps identical
+  exact match (billing-agent)   FAIL  step 3: tool send_receipt != issue_refund
+  in order (policy-agent)       PASS  2 of 2 in order
+  in order (billing-agent)      FAIL  step 3: got send_receipt, want issue_refund
+  dependency graph              FAIL  step 9: send_receipt ran before issue_refund succeeded
+  one refund of 240, right card PASS  refunds=[(240, 'P1-B-2002')]
+  approval of 240 first         PASS  approval 09:00:01, refund 09:00:03
+  receipt says $240             FAIL  outbox=['Receipt: $0 refunded for B-2002.']
+  one case note                 PASS  case_log=['refund case']
+  handoff facts to billing      PASS  step 6: needs_approval=True passed on as policy reported it
+  reply names order and amount  PASS  mentions B-2002, 240
+  cause from the handoff and money rules: none
+  cause with the order check added: billing-agent, step 9 (send_receipt)
+
+-- refund sent twice --
+  policy-agent calls: get_order, check_policy
+  billing-agent calls: get_payment, request_approval, issue_refund, issue_refund, send_receipt, log_case
+  reply: "Your refund of $240 for order B-2002 has been issued."
+  exact match (policy-agent)    PASS  all 2 steps identical
+  exact match (billing-agent)   FAIL  6 steps vs 5; step 4: tool issue_refund != send_receipt
+  in order (policy-agent)       PASS  2 of 2 in order
+  in order (billing-agent)      FAIL  step 4: got issue_refund, want send_receipt
+  dependency graph              FAIL  step 10: issue_refund ran again
+  one refund of 240, right card FAIL  refunds=[(240, 'P1-B-2002'), (240, 'P1-B-2002')]
+  approval of 240 first         PASS  approval 09:00:01, refund 09:00:02
+  receipt says $240             FAIL  outbox=['Receipt: $480 refunded for B-2002.']
+  one case note                 PASS  case_log=['refund case']
+  handoff facts to billing      PASS  step 6: needs_approval=True passed on as policy reported it
+  reply names order and amount  PASS  mentions B-2002, 240
+  cause from the handoff and money rules: none
+  cause with the order check added: billing-agent, step 10 (issue_refund)
+
+-- payment lookup skipped --
+  policy-agent calls: get_order, check_policy
+  billing-agent calls: request_approval, issue_refund, send_receipt, log_case
+  reply: "We could not refund order B-2002. A person will follow up."
+  exact match (policy-agent)    PASS  all 2 steps identical
+  exact match (billing-agent)   FAIL  4 steps vs 5; step 1: tool request_approval != get_payment
+  in order (policy-agent)       PASS  2 of 2 in order
+  in order (billing-agent)      FAIL  step 2: payment_id None != 'P1-B-2002'
+  dependency graph              FAIL  step 8: issue_refund ran before get_payment succeeded; step 9: send_receipt ran before issue_refund succeeded; step 13: get_payment never succeeded; step 13: issue_refund never succeeded
+  one refund of 240, right card FAIL  refunds=[]
+  approval of 240 first         FAIL  approval 09:00:01, no refund
+  receipt says $240             FAIL  outbox=['Receipt: $0 refunded for B-2002.']
+  one case note                 PASS  case_log=['refund case']
+  handoff facts to billing      PASS  step 6: needs_approval=True passed on as policy reported it
+  reply names order and amount  FAIL  missing ['240']
+  cause from the handoff and money rules: none
+  cause with the order check added: billing-agent, step 8 (issue_refund)
+
+-- policy checks before it looks up the order --
+  policy-agent calls: check_policy, get_order
+  billing-agent calls: get_payment, issue_refund, send_receipt, log_case
+  reply: "Your refund of $240 for order B-2002 has been issued."
+  exact match (policy-agent)    FAIL  step 1: tool check_policy != get_order
+  exact match (billing-agent)   FAIL  4 steps vs 5; step 2: tool issue_refund != request_approval
+  in order (policy-agent)       FAIL  step 1: got check_policy, want get_order
+  in order (billing-agent)      FAIL  step 2: got issue_refund, want request_approval
+  dependency graph              FAIL  step 3: check_policy ran before get_order succeeded; step 8: issue_refund ran before request_approval succeeded; step 13: request_approval never succeeded
+  one refund of 240, right card PASS  refunds=[(240, 'P1-B-2002')]
+  approval of 240 first         FAIL  no approval, refund 09:00:01
+  receipt says $240             PASS  outbox=['Receipt: $240 refunded for B-2002.']
+  one case note                 PASS  case_log=['refund case']
+  handoff facts to billing      PASS  step 6: needs_approval=False passed on as policy reported it
+  reply names order and amount  PASS  mentions B-2002, 240
+  cause from the handoff and money rules: billing-agent, step 8 (issue_refund)
+  cause with the order check added: policy-agent, step 3 (check_policy)
+
+summary (P = pass, F = fail):
+  run                                         exact     in order  graph     effects   reply     cause (first wrong step)
+  as designed                                 P         P         P         P         P         none
+  case note logged first                      F         F         P         P         P         none
+  refund before approval                      F         F         F         F         P         billing-agent, step 8 (issue_refund)
+  receipt before refund                       F         F         F         F         P         billing-agent, step 9 (send_receipt)
+  refund sent twice                           F         F         F         F         P         billing-agent, step 10 (issue_refund)
+  payment lookup skipped                      F         F         F         F         F         billing-agent, step 8 (issue_refund)
+  policy checks before it looks up the order  F         F         F         F         P         policy-agent, step 3 (check_policy)
+route check (grade 2) on these runs: 7 of 7 went policy-agent, then billing-agent, as the refund expects
+
+=== Testing the order checkers on every order of billing's five tools (5! = 120 orders) ===
+policy runs as designed. A right order is one where every tool effect check and the reply pass.
+right orders: 10 of 120
+  checker                                accepts, of the right   accepts, of the wrong
+  exact match                                        1 of 10                  0 of 110
+  in order                                           2 of 10                  0 of 110
+  in order, case note checked apart                 10 of 10                  0 of 110
+  dependency graph                                  10 of 10                  0 of 110
+  reply check alone                                 10 of 10                 50 of 110
+what each checker got wrong:
+  exact match accepts 1 right order, the one in its reference: get_payment, request_approval, issue_refund, send_receipt, log_case
+  in order rejects 8 right orders. In each one the case note comes before the receipt
+  the reply check accepts 50 wrong orders. They are the wrong orders in which a refund went through
+  the dependency graph agrees with the database checks on 120 of 120 orders, because both come from the same rules
+checker bugs this test catches (the graph with one change):
+  edge request_approval -> issue_refund left out: accepts 10 wrong orders
+  edge issue_refund -> send_receipt left out: accepts 30 wrong orders
+  edge get_payment -> issue_refund left out: accepts 0 wrong orders
+  same edge left out, and a failed call counted as done: accepts 10 wrong orders
+  no once-only rule: the refund sent twice passes the graph
+
+=== Grade 2, routing: one request sent to the wrong agent ===
+customer: "Order C-3003 arrived damaged. Refund please."
+intention: refund -> route expected: policy then billing; reply must name ['C-3003', '160']
+steps rebuilt from the spans, in time order:
+   1. [customer] message to orchestrator: {"order_id": "C-3003", "reason": "damaged", "text": "Order C-3003 arrived damaged. Refund please."}
+   2. [orchestrator] message to shipping-agent: {"order_id": "C-3003", "reason": "damaged"}
+   3. [shipping-agent] get_shipment(order_id='C-3003')
+   4. [shipping-agent] reship_item(order_id='C-3003')
+   5. [shipping-agent] message to orchestrator: {"order_id": "C-3003", "reshipped": true}
+   6. [orchestrator] message to customer: {"answer": "A replacement for order C-3003 is on its way."}
+final answer: "A replacement for order C-3003 is on its way."
+  shipping-agent did its own job: get_shipment, reship_item
+  route (who got the work)      FAIL  step 2: handoff to shipping-agent, want policy-agent
+  handoff facts                 PASS  no facts listed for shipping-agent on a refund, so nothing to check
+  rows the tools wrote          FAIL  wrote {'shipments': 1}, want {'approvals': 1, 'refunds': 1, 'outbox': 1, 'case_log': 1}
+  reply names order and amount  FAIL  missing ['160']
+  cause from the handoff and money rules: none
+  cause with the routing and order checks added: orchestrator, step 2 (handoff to shipping-agent)
+
+=== Grade 2: every route for one case of each intention (route forced, no router) ===
+refund (C-3003), route expected: policy then billing
+  sent to policy then billing                         route PASS  rows PASS  reply PASS
+    reply "Your refund of $160 for order C-3003 has been issued."; extra rows none; missing rows none
+  sent to shipping                                    route FAIL  rows FAIL  reply FAIL
+    reply "A replacement for order C-3003 is on its way."; extra rows {'shipments': 1}; missing rows {'approvals': 1, 'refunds': 1, 'outbox': 1, 'case_log': 1}
+  sent to billing                                     route FAIL  rows FAIL  reply FAIL
+    reply "We found no billing problem on order C-3003."; extra rows none; missing rows {'approvals': 1, 'refunds': 1, 'outbox': 1, 'case_log': 1}
+parcel status (H-8008), route expected: shipping
+  sent to policy then billing (stopped after policy)  route FAIL  rows PASS  reply FAIL
+    reply "Sorry, order H-8008 is not refundable."; extra rows none; missing rows none
+  sent to shipping                                    route PASS  rows PASS  reply PASS
+    reply "Order H-8008 is in transit."; extra rows none; missing rows none
+  sent to billing                                     route FAIL  rows PASS  reply FAIL
+    reply "We found no billing problem on order H-8008."; extra rows none; missing rows none
+charged twice (L-1111), route expected: billing
+  sent to policy then billing (stopped after policy)  route FAIL  rows FAIL  reply FAIL
+    reply "Sorry, order L-1111 is not refundable."; extra rows none; missing rows {'approvals': 1, 'refunds': 1, 'outbox': 1, 'case_log': 1}
+  sent to shipping                                    route FAIL  rows FAIL  reply FAIL
+    reply "Order L-1111 is delivered."; extra rows none; missing rows {'approvals': 1, 'refunds': 1, 'outbox': 1, 'case_log': 1}
+  sent to billing                                     route PASS  rows PASS  reply PASS
+    reply "Your refund of $120 for order L-1111 has been issued."; extra rows none; missing rows none
+
+=== Grade 2 across cases: 12 made-up requests through the keyword router ===
+  order   intention      expected             taken                route rows reply cause (first wrong step)
+  B-2002  refund         policy then billing  policy then billing  P     P    P     none
+  C-3003  refund         policy then billing  shipping             F     F    F     orchestrator, step 2 (handoff to shipping-agent)
+  D-4004  refund         policy then billing  policy then billing  P     P    P     none
+  E-5005  refund         policy then billing  policy then billing  P     P    P     none
+  H-8008  parcel status  shipping             shipping             P     P    P     none
+  J-9009  parcel status  shipping             shipping             P     P    P     none
+  K-1010  parcel status  shipping             billing              F     P    F     orchestrator, step 2 (handoff to billing-agent)
+  Q-1515  parcel status  shipping             shipping             P     P    P     none
+  L-1111  charged twice  billing              billing              P     P    P     none
+  M-1212  charged twice  billing              billing              P     P    P     none
+  N-1313  charged twice  billing              shipping             F     F    F     orchestrator, step 2 (handoff to shipping-agent)
+  P-1414  charged twice  billing              billing              P     P    P     none
+routed as expected: 9 of 12
+routes taken (rows: the customer's intention, columns: the route taken):
+                    policy then billing             shipping              billing   other
+  refund                              3                    1                    0       0
+  parcel status                       0                    3                    1       0
+  charged twice                       0                    1                    3       0
+what each wrong route did:
+  C-3003 sent to shipping: reply "A replacement for order C-3003 is on its way."; extra rows {'shipments': 1}; missing rows {'approvals': 1, 'refunds': 1, 'outbox': 1, 'case_log': 1}
+  K-1010 sent to billing: reply "We found no billing problem on order K-1010."; extra rows none; missing rows none
+  N-1313 sent to shipping: reply "Order N-1313 is delivered."; extra rows none; missing rows {'approvals': 1, 'refunds': 1, 'outbox': 1, 'case_log': 1}
+
+=== False-alarm test: a refund that policy rightly turns down ===
+customer: "I changed my mind about the lamp from F-6006. Can I get a refund?"
+expected: refund turned down -> route policy; reply must name ['F-6006', 'not refundable']
+  reply: "Sorry, order F-6006 is not refundable."
+  route (who got the work)      PASS  step 2: policy-agent
+  dependency graph              PASS  every edge holds
+  rows the tools wrote          PASS  wrote nothing, want nothing
+  reply names order and refusal PASS  mentions F-6006, not refundable
+  cause: none
+the same run, labelled with the intention alone (refund, route policy then billing):
+  cause: orchestrator, step 7 (no handoff)

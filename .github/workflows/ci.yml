@@ -18,9 +18,17 @@ jobs:
         run: |
           python run_demo.py > run_demo.out
           diff run_demo.out expected/run_demo.txt
+      - name: Run the tool-order and routing examples and diff the output with expected/
+        run: |
+          python run_ext.py > run_ext.out
+          diff run_ext.out expected/run_ext.txt
       - name: Run the article's code blocks alone and diff the output with expected/
         run: |
           python check_excerpts.py > check_excerpts.out
           diff check_excerpts.out expected/check_excerpts.txt
       - name: Fail if the extracted code blocks differ from the committed excerpts/
-        run: git diff --exit-code excerpts/
+        # git status also lists a new excerpt file that was never committed,
+        # which git diff would miss.
+        run: |
+          git status --porcelain excerpts/
+          test -z "$(git status --porcelain excerpts/)"
