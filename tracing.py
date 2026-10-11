@@ -7,8 +7,9 @@ conventions (v1.44.0, status: Development):
   chat {gen_ai.request.model}        one per model turn
   execute_tool {gen_ai.tool.name}    one per tool call, kind INTERNAL
 Each message an agent sends or receives becomes a span event named
-"agent.message", with from, to and content attributes, where content
-holds the facts as JSON. The invoke_agent span also copies the messages
+"agent.message", with from, to and content attributes. content holds
+the message as JSON: a dict of facts, or a string when the agent wrote
+the message in prose. The invoke_agent span also copies the messages
 into the opt-in gen_ai.input.messages and gen_ai.output.messages
 attributes. This module sends nothing over the network. The spans go
 to an InMemorySpanExporter, and save_json writes them to a local file.

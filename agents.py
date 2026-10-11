@@ -14,13 +14,17 @@ The business rule says approval comes before any money moves.
 issue_refund does not check it, and many real tool backends do not
 check it either.
 
-Billing follows a fixed instruction in place of a prompt. If the task
-says approval is needed, billing asks for it first. Otherwise it
-refunds and then files an approval record for the audit trail. So what
-billing does depends on the orchestrator's handoff, the message that
-passes the work to billing.
+The agents pass work the way several agent frameworks do by default.
+A tool result stays with the agent that called the tool. The policy
+agent answers the orchestrator in prose, and the orchestrator writes
+billing's task in its own words, from that answer alone. Only the
+policy agent's rules tool knows the approval limit. The orchestrator
+and billing act on what they are told. So billing asks for approval
+first only if policy's answer said a manager must approve the refund,
+and the orchestrator passed that on.
 """
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -112,10 +116,11 @@ TOOLS_BY_AGENT = {
 def _as_messages(role, facts, finish=None):
     """Return a one-message GenAI message list as a JSON string.
 
-    The message's only text part holds the facts as JSON.
+    The message's only text part holds the text of a message in prose,
+    or the facts as JSON when the message is a dict.
     """
-    msg = {"role": role,
-           "parts": [{"type": "text", "content": json.dumps(facts)}]}
+    text = facts if isinstance(facts, str) else json.dumps(facts)
+    msg = {"role": role, "parts": [{"type": "text", "content": text}]}
     if finish:
         msg["finish_reason"] = finish
     return json.dumps([msg])
@@ -187,55 +192,127 @@ class Run:
 
 
 # ---- the three agents ----------------------------------------------------
+# The scripted agents read their messages with these patterns. The
+# scorers read messages with their own code, read_facts in scorers.py,
+# so no check grades an agent by the agent's own reading.
 
-def policy_agent(run, task):
+ORDER_ID = r"\b([A-Z]-\d{4})\b"
+DOLLARS = r"\$(\d+)"
+EMAIL = r"([\w.]+@[\w.]+\w)"
+
+
+def _find(pattern, text):
+    return re.search(pattern, text).group(1)
+
+
+# The sentence policy adds to its answer when the refund needs a
+# manager's approval first.
+APPROVAL_LINE = (f"It is over ${APPROVAL_LIMIT}, so a manager must approve"
+                 " it before any money goes out.")
+
+
+def policy_agent(run, task, reports_approval=True):
+    """Look the order up, check the rules, and answer in prose.
+
+    The tool results stay with the policy agent. Its answer says
+    whether the order can be refunded, what it cost and who paid. With
+    reports_approval=False it leaves out the manager's approval, which
+    its check_policy result still says is needed.
+    """
     order = run.tool(POLICY, "get_order", order_id=task["order_id"])
-    policy = run.tool(POLICY, "check_policy", order_id=task["order_id"],
-                      reason=task["reason"])
-    return {"order_id": order["order_id"], "email": order["email"],
-            "amount": order["amount"], **policy}
+    verdict = run.tool(POLICY, "check_policy", order_id=task["order_id"],
+                       reason=task["reason"])
+    oid = order["order_id"]
+    if not verdict["refundable"]:
+        return f"Order {oid} cannot be refunded for this reason."
+    answer = (f"Order {oid} can be refunded. It arrived {task['reason']},"
+              f" which the policy covers. It cost ${order['amount']},"
+              f" paid by {order['email']}.")
+    if verdict["needs_approval"] and reports_approval:
+        answer += " " + APPROVAL_LINE
+    return answer
 
 
-def make_billing_agent(heeds_approval_flag=True):
-    def billing_agent(run, task):
-        oid, amount = task["order_id"], task["amount"]
-        flag = task.get("needs_approval") and heeds_approval_flag
-        if flag:
+def write_brief(answer):
+    """The orchestrator's task for billing, in its own words.
+
+    It passes on what policy's answer says, and nothing more.
+    """
+    oid, email = _find(ORDER_ID, answer), _find(EMAIL, answer)
+    amount, reason = _find(DOLLARS, answer), _find(r"arrived (\w+)", answer)
+    brief = (f"Refund order {oid}: ${amount} to {email}. It arrived"
+             f" {reason} and policy says it can be refunded.")
+    if "approve" in answer.lower():
+        limit = _find(r"over \$(\d+)", answer)
+        brief += (f" It is over ${limit}, so get a manager's approval"
+                  " first, then refund.")
+    return brief
+
+
+def make_billing_agent(heeds_approval=True):
+    """Billing reads its brief with its own rule: if the brief says to
+    get approval first, it asks for approval, then refunds. With
+    heeds_approval=False (the control run) it refunds first anyway and
+    files the approval after. A brief that says nothing about approval
+    gets a refund only."""
+    def billing_agent(run, brief):
+        oid, email = _find(ORDER_ID, brief), _find(EMAIL, brief)
+        amount = int(_find(DOLLARS, brief))
+        first = "approval first" in brief.lower()
+
+        def approve():
             run.tool(BILLING, "request_approval", order_id=oid,
                      amount=amount, note="approval needed per policy")
+
+        def refund():
             run.tool(BILLING, "issue_refund", order_id=oid, amount=amount)
+
+        if first and heeds_approval:
+            approve()
+            refund()
+        elif first:
+            refund()
+            approve()
         else:
-            run.tool(BILLING, "issue_refund", order_id=oid, amount=amount)
-            run.tool(BILLING, "request_approval", order_id=oid,
-                     amount=amount, note="filed after refund for audit")
-        run.tool(BILLING, "send_email", to=task["email"],
+            refund()
+        run.tool(BILLING, "send_email", to=email,
                  body=f"Refund of ${amount} issued for {oid}.")
         return {"order_id": oid, "refunded": amount}
     return billing_agent
 
 
-def run_system(customer_request, handoff_keys, conversation_id,
-               heeds_approval_flag=True):
+def run_system(customer_request, conversation_id, reports_approval=True,
+               heeds_approval=True, recorded=None):
     """Run the orchestrator end to end. Returns (db, answer, spans).
 
-    `handoff_keys` lists the facts the orchestrator copies from the
-    policy agent's reply into its handoff to billing. In the failing
-    run the list leaves out needs_approval.
+    reports_approval: whether the policy agent's answer says a manager
+    must approve the refund first. In the failing run it does not.
+    heeds_approval: whether billing follows a brief that says so. In the
+    control run it does not. recorded: (results, answer) to replay the
+    policy agent with. Its tools return the recorded results, keyed by
+    tool name, and it sends `answer` in place of its own.
     """
-    run = Run(conversation_id)
-    billing = make_billing_agent(heeds_approval_flag)
+    tools = TOOLS_BY_AGENT
+    if recorded is not None:
+        tools = {**TOOLS_BY_AGENT, POLICY: {
+            name: (lambda db, clock, _r=r, **args: _r)
+            for name, r in recorded[0].items()}}
+    run = Run(conversation_id, tools=tools)
+    billing = make_billing_agent(heeds_approval)
+
+    def policy(task):
+        said = policy_agent(run, task, reports_approval)
+        return said if recorded is None else recorded[1]
 
     def orchestrator(req):
         run.chat("tool_call")              # decides to ask policy first
-        verdict = run.invoke(POLICY, ORCH,
-                             {"order_id": req["order_id"],
-                              "reason": req["reason"]},
-                             lambda t: policy_agent(run, t))
-        if not verdict["refundable"]:
+        answer = run.invoke(POLICY, ORCH,
+                            {"order_id": req["order_id"],
+                             "reason": req["reason"]}, policy)
+        if "can be refunded" not in answer:
             return {"answer": "Sorry, this order is not refundable."}
         run.chat("tool_call")              # decides to hand off to billing
-        handoff = {k: verdict[k] for k in handoff_keys}
-        done = run.invoke(BILLING, ORCH, handoff,
+        done = run.invoke(BILLING, ORCH, write_brief(answer),
                           lambda t: billing(run, t))
         return {"answer": f"Your refund of ${done['refunded']} for order "
                           f"{done['order_id']} has been issued."}
@@ -245,24 +322,22 @@ def run_system(customer_request, handoff_keys, conversation_id,
     return run.db, reply["answer"], T.take_spans()
 
 
-def replay_billing(task, conversation_id):
-    """Run billing alone on the given handoff, with a fresh database."""
-    run = Run(conversation_id)
-    run.invoke(BILLING, ORCH, task,
-               lambda t: make_billing_agent()(run, t))
-    run.db.commit()
-    return run.db, T.take_spans()
+def replay_from_answer(customer_request, results, answer, conversation_id):
+    """Run the case again on a fresh database with one fact changed.
+
+    Policy's tools return the recorded `results` (tool name to result),
+    its answer is replaced by `answer`, and the orchestrator and billing
+    run again. Returns (db, spans).
+    """
+    db, _, spans = run_system(customer_request, conversation_id,
+                              recorded=(results, answer))
+    return db, spans
 
 
 # ---- the runs used in the article ----------------------------------------
 
 ORDER = "A-1001"
-REQUEST_A = {"order_id": ORDER, "reason": "broken",
-             "text": "My order A-1001 arrived broken. I need a refund."}
-REQUEST_B = {"order_id": ORDER, "reason": "damaged",
-             "text": "Order A-1001 arrived damaged, photo attached."}
-
-# In the failing run the orchestrator summarises the policy reply and
-# leaves out the approval flag. In the correct run it passes the flag on.
-HANDOFF_DROPS_FLAG = ["order_id", "amount", "email", "refundable"]
-HANDOFF_COMPLETE = HANDOFF_DROPS_FLAG + ["needs_approval"]
+# Runs A, B and C all start from this request, so only the policy
+# agent's answer and billing's order of calls differ between them.
+REQUEST = {"order_id": ORDER, "reason": "broken",
+           "text": "My order A-1001 arrived broken. I need a refund."}

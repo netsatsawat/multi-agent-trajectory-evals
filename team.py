@@ -306,8 +306,12 @@ def run_case(case, conversation_id, route=None, plans=None):
 # from it.
 
 REFUND_ROWS = {"approvals": 1, "refunds": 1, "outbox": 1, "case_log": 1}
-REFUND_NEEDS = {POLICY: ["order_id", "reason"],
-                BILLING: ["order_id", "amount", "email", "needs_approval"]}
+# The facts each receiver needs, keyed by (sender, receiver) as NEEDS
+# in attribution.py is. The handoffs here are dicts, so read_facts
+# reads them as they are, and needs_approval becomes the fact approval.
+REFUND_NEEDS = {(ORCH, POLICY): ["order_id", "reason"],
+                (POLICY, ORCH): attribution.REFUND_FACTS,
+                (ORCH, BILLING): attribution.REFUND_FACTS}
 EXPECT = {
     "refund": {
         "intent": "refund", "want": [POLICY, BILLING], "say": "amount",
@@ -315,17 +319,17 @@ EXPECT = {
     "refund turned down": {
         "intent": "refund", "want": [POLICY], "say": "not refundable",
         "rows": {}, "after": {"check_policy": ["get_order"]},
-        "needs": {POLICY: REFUND_NEEDS[POLICY]}},
+        "needs": {(ORCH, POLICY): REFUND_NEEDS[(ORCH, POLICY)]}},
     "parcel status": {
         "intent": "parcel status", "want": [SHIPPING],
         "say": "in transit", "rows": {}, "after": {"get_shipment": []},
-        "needs": {SHIPPING: ["order_id"]}},
+        "needs": {(ORCH, SHIPPING): ["order_id"]}},
     "charged twice": {
         "intent": "charged twice", "want": [BILLING], "say": "amount",
         "rows": REFUND_ROWS,
         "after": {"issue_refund": ["get_payment", "request_approval"],
                   "send_receipt": ["issue_refund"], "log_case": []},
-        "needs": {BILLING: ["order_id"]}},
+        "needs": {(ORCH, BILLING): ["order_id"]}},
 }
 
 
@@ -379,18 +383,12 @@ CASES = [
 def needs_for(case):
     """Use this case's handoff facts while attribute_failure() runs.
 
-    attribution.NEEDS lists the facts per receiver, which works while
+    attribution.NEEDS lists the facts per handoff, which works while
     each agent does one job. Billing does two jobs here (a refund after
     policy, a double charge alone), and each job needs different facts.
-    handoff_gaps reads the module-level NEEDS, so swapping it keeps the
-    article's excerpt 2 unchanged.
     """
-    saved = attribution.NEEDS
-    attribution.NEEDS = case["needs"]
-    try:
+    with attribution.use_needs(case["needs"]):
         yield
-    finally:
-        attribution.NEEDS = saved
 
 
 def rows_written(db):
