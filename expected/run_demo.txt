@@ -1,7 +1,7 @@
 
-=== Run A: the orchestrator drops the approval flag ===
+=== Run A: the policy agent's answer leaves out the approval ===
 customer: "My order A-1001 arrived broken. I need a refund."
-trace: 3 invoke_agent, 10 chat, 5 execute_tool spans -> traces/run_a.json
+trace: 3 invoke_agent, 9 chat, 4 execute_tool spans -> traces/run_a.json
 span tree (the stand-in's chat spans carry no content):
   invoke_agent orchestrator
     [event agent.message] customer -> orchestrator: {"order_id": "A-1001", "reason": "broken", "text": "My order A-1001 arrived broken. I need a refund."}
@@ -13,14 +13,12 @@ span tree (the stand-in's chat spans carry no content):
       chat scripted-stand-in
       execute_tool check_policy  args={"order_id": "A-1001", "reason": "broken"}  result={"refundable": true, "needs_approval": true}
       chat scripted-stand-in
-      [event agent.message] policy-agent -> orchestrator: {"order_id": "A-1001", "email": "kim@example.com", "amount": 450, "refundable": true, "needs_approval": true}
+      [event agent.message] policy-agent -> orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com."
     chat scripted-stand-in
     invoke_agent billing-agent
-      [event agent.message] orchestrator -> billing-agent: {"order_id": "A-1001", "amount": 450, "email": "kim@example.com", "refundable": true}
+      [event agent.message] orchestrator -> billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded."
       chat scripted-stand-in
       execute_tool issue_refund  args={"order_id": "A-1001", "amount": 450}  result={"refunded": 450}
-      chat scripted-stand-in
-      execute_tool request_approval  args={"order_id": "A-1001", "amount": 450, "note": "filed after refund for audit"}  result={"approved": true}
       chat scripted-stand-in
       execute_tool send_email  args={"to": "kim@example.com", "body": "Refund of $450 issued for A-1001."}  result={"sent": true}
       chat scripted-stand-in
@@ -32,10 +30,156 @@ steps rebuilt from the spans, in time order:
    2. [orchestrator] message to policy-agent: {"order_id": "A-1001", "reason": "broken"}
    3. [policy-agent] get_order(order_id='A-1001')
    4. [policy-agent] check_policy(order_id='A-1001', reason='broken')
-   5. [policy-agent] message to orchestrator: {"order_id": "A-1001", "email": "kim@example.com", "amount": 450, "refundable": true, "needs_approval": true}
-   6. [orchestrator] message to billing-agent: {"order_id": "A-1001", "amount": 450, "email": "kim@example.com", "refundable": true}
+   5. [policy-agent] message to orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com."
+   6. [orchestrator] message to billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded."
    7. [billing-agent] issue_refund(order_id='A-1001', amount=450)
-   8. [billing-agent] request_approval(order_id='A-1001', amount=450, note='filed after refund for audit')
+   8. [billing-agent] send_email(to='kim@example.com', body='Refund of $450 issued for A-1001.')
+   9. [billing-agent] message to orchestrator: {"order_id": "A-1001", "refunded": 450}
+  10. [orchestrator] message to customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
+final answer: "Your refund of $450 for order A-1001 has been issued."
+-- grade 1: each agent's path (in order, a rule per argument) --
+  policy-agent path             PASS  2 of 2 in order  [get_order, check_policy]
+  billing-agent path            FAIL  step 1: got issue_refund, want request_approval  [issue_refund, send_email]
+  judge (stub) on reason: 'broken' vs 'damaged' -> same meaning
+-- grade 1, billing's tools: what they wrote to SQLite --
+  one refund row of 450         PASS  refunds=[450]
+  one approval row of 450       FAIL  approvals=[]
+  approval before refund        FAIL  row missing
+  order status is refunded      PASS  status=refunded
+-- grade 2: each handoff (the right agent, and each fact the next agent needs) --
+  route (who got the work)      PASS  step 2: policy-agent, step 6: billing-agent
+  orchestrator -> policy-agent  PASS  step 2: as the sender knew: order_id, reason
+  policy-agent -> orchestrator  FAIL  step 5: approval: knew 'before refund', sent 'none'
+  orchestrator -> billing-agent PASS  step 6: as the sender knew: order_id, amount, email, approval='none'
+  judge (stub) on approval, step 5: no approval phrase -> none
+  judge (stub) on approval, step 6: no approval phrase -> none
+-- grade 3: the outcome, checked against the customer's intention --
+  reply names order and amount  PASS  mentions A-1001, 450
+-- failure attribution (walk the tree in time order) --
+  first wrong step: step 5, owner policy-agent, handoff to orchestrator
+    - approval: knew 'before refund', sent 'none'
+  first broken rule: step 7, by billing-agent, issue_refund (refund before approval)
+  cause: policy-agent, step 5 (handoff to orchestrator). symptom: billing-agent's issue_refund at step 7
+
+=== Runs A and B with the payload check keyed three ways ===
+  keyed by receiver, nothing listed for the orchestrator
+    failing run: cause billing-agent, step 7 (issue_refund)
+    correct run: cause none
+  keyed by receiver, one list for the orchestrator
+    failing run: cause customer, step 1 (handoff to orchestrator)
+    correct run: cause customer, step 1 (handoff to orchestrator)
+  keyed by sender and receiver, as NEEDS is
+    failing run: cause policy-agent, step 5 (handoff to orchestrator)
+    correct run: cause none
+
+=== Replay: policy's answer with the approval sentence put back ===
+  answer as sent:      "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com."
+  with fact restored:  "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com. It is over $100, so a manager must approve it before any money goes out."
+  orchestrator now writes: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded. It is over $100, so get a manager's approval first, then refund."
+  billing now calls: request_approval, issue_refund, send_email
+  billing path                  PASS  2 of 2 in order
+  approval before refund        PASS  approval 09:00:01, refund 09:00:02
+  every check, all three grades PASS  cause: none
+
+=== Run B: the correct system ===
+customer: "My order A-1001 arrived broken. I need a refund."
+trace: 3 invoke_agent, 10 chat, 5 execute_tool spans -> traces/run_b.json
+span tree (the stand-in's chat spans carry no content):
+  invoke_agent orchestrator
+    [event agent.message] customer -> orchestrator: {"order_id": "A-1001", "reason": "broken", "text": "My order A-1001 arrived broken. I need a refund."}
+    chat scripted-stand-in
+    invoke_agent policy-agent
+      [event agent.message] orchestrator -> policy-agent: {"order_id": "A-1001", "reason": "broken"}
+      chat scripted-stand-in
+      execute_tool get_order  args={"order_id": "A-1001"}  result={"order_id": "A-1001", "email": "kim@example.com", "amount": 450, "status": "delivered"}
+      chat scripted-stand-in
+      execute_tool check_policy  args={"order_id": "A-1001", "reason": "broken"}  result={"refundable": true, "needs_approval": true}
+      chat scripted-stand-in
+      [event agent.message] policy-agent -> orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com. It is over $100, so a manager must approve it before any money goes out."
+    chat scripted-stand-in
+    invoke_agent billing-agent
+      [event agent.message] orchestrator -> billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded. It is over $100, so get a manager's approval first, then refund."
+      chat scripted-stand-in
+      execute_tool request_approval  args={"order_id": "A-1001", "amount": 450, "note": "approval needed per policy"}  result={"approved": true}
+      chat scripted-stand-in
+      execute_tool issue_refund  args={"order_id": "A-1001", "amount": 450}  result={"refunded": 450}
+      chat scripted-stand-in
+      execute_tool send_email  args={"to": "kim@example.com", "body": "Refund of $450 issued for A-1001."}  result={"sent": true}
+      chat scripted-stand-in
+      [event agent.message] billing-agent -> orchestrator: {"order_id": "A-1001", "refunded": 450}
+    chat scripted-stand-in
+    [event agent.message] orchestrator -> customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
+steps rebuilt from the spans, in time order:
+   1. [customer] message to orchestrator: {"order_id": "A-1001", "reason": "broken", "text": "My order A-1001 arrived broken. I need a refund."}
+   2. [orchestrator] message to policy-agent: {"order_id": "A-1001", "reason": "broken"}
+   3. [policy-agent] get_order(order_id='A-1001')
+   4. [policy-agent] check_policy(order_id='A-1001', reason='broken')
+   5. [policy-agent] message to orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com. It is over $100, so a manager must approve it before any money goes out."
+   6. [orchestrator] message to billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded. It is over $100, so get a manager's approval first, then refund."
+   7. [billing-agent] request_approval(order_id='A-1001', amount=450, note='approval needed per policy')
+   8. [billing-agent] issue_refund(order_id='A-1001', amount=450)
+   9. [billing-agent] send_email(to='kim@example.com', body='Refund of $450 issued for A-1001.')
+  10. [billing-agent] message to orchestrator: {"order_id": "A-1001", "refunded": 450}
+  11. [orchestrator] message to customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
+final answer: "Your refund of $450 for order A-1001 has been issued."
+-- grade 1: each agent's path (in order, a rule per argument) --
+  policy-agent path             PASS  2 of 2 in order  [get_order, check_policy]
+  billing-agent path            PASS  2 of 2 in order  [request_approval, issue_refund, send_email]
+  judge (stub) on reason: 'broken' vs 'damaged' -> same meaning
+-- grade 1, billing's tools: what they wrote to SQLite --
+  one refund row of 450         PASS  refunds=[450]
+  one approval row of 450       PASS  approvals=[450]
+  approval before refund        PASS  approval 09:00:01, refund 09:00:02
+  order status is refunded      PASS  status=refunded
+-- grade 2: each handoff (the right agent, and each fact the next agent needs) --
+  route (who got the work)      PASS  step 2: policy-agent, step 6: billing-agent
+  orchestrator -> policy-agent  PASS  step 2: as the sender knew: order_id, reason
+  policy-agent -> orchestrator  PASS  step 5: as the sender knew: order_id, amount, email, approval='before refund'
+  orchestrator -> billing-agent PASS  step 6: as the sender knew: order_id, amount, email, approval='before refund'
+  judge (stub) on approval, step 5: 'approve it before' -> before refund
+  judge (stub) on approval, step 6: 'approval first' -> before refund
+-- grade 3: the outcome, checked against the customer's intention --
+  reply names order and amount  PASS  mentions A-1001, 450
+-- failure attribution (walk the tree in time order) --
+  none: every handoff carries what the next agent needs, and no rule is broken
+
+=== Run C (control): the brief says approval first, billing refunds first anyway ===
+customer: "My order A-1001 arrived broken. I need a refund."
+trace: 3 invoke_agent, 10 chat, 5 execute_tool spans -> traces/run_c.json
+span tree (the stand-in's chat spans carry no content):
+  invoke_agent orchestrator
+    [event agent.message] customer -> orchestrator: {"order_id": "A-1001", "reason": "broken", "text": "My order A-1001 arrived broken. I need a refund."}
+    chat scripted-stand-in
+    invoke_agent policy-agent
+      [event agent.message] orchestrator -> policy-agent: {"order_id": "A-1001", "reason": "broken"}
+      chat scripted-stand-in
+      execute_tool get_order  args={"order_id": "A-1001"}  result={"order_id": "A-1001", "email": "kim@example.com", "amount": 450, "status": "delivered"}
+      chat scripted-stand-in
+      execute_tool check_policy  args={"order_id": "A-1001", "reason": "broken"}  result={"refundable": true, "needs_approval": true}
+      chat scripted-stand-in
+      [event agent.message] policy-agent -> orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com. It is over $100, so a manager must approve it before any money goes out."
+    chat scripted-stand-in
+    invoke_agent billing-agent
+      [event agent.message] orchestrator -> billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded. It is over $100, so get a manager's approval first, then refund."
+      chat scripted-stand-in
+      execute_tool issue_refund  args={"order_id": "A-1001", "amount": 450}  result={"refunded": 450}
+      chat scripted-stand-in
+      execute_tool request_approval  args={"order_id": "A-1001", "amount": 450, "note": "approval needed per policy"}  result={"approved": true}
+      chat scripted-stand-in
+      execute_tool send_email  args={"to": "kim@example.com", "body": "Refund of $450 issued for A-1001."}  result={"sent": true}
+      chat scripted-stand-in
+      [event agent.message] billing-agent -> orchestrator: {"order_id": "A-1001", "refunded": 450}
+    chat scripted-stand-in
+    [event agent.message] orchestrator -> customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
+steps rebuilt from the spans, in time order:
+   1. [customer] message to orchestrator: {"order_id": "A-1001", "reason": "broken", "text": "My order A-1001 arrived broken. I need a refund."}
+   2. [orchestrator] message to policy-agent: {"order_id": "A-1001", "reason": "broken"}
+   3. [policy-agent] get_order(order_id='A-1001')
+   4. [policy-agent] check_policy(order_id='A-1001', reason='broken')
+   5. [policy-agent] message to orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com. It is over $100, so a manager must approve it before any money goes out."
+   6. [orchestrator] message to billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded. It is over $100, so get a manager's approval first, then refund."
+   7. [billing-agent] issue_refund(order_id='A-1001', amount=450)
+   8. [billing-agent] request_approval(order_id='A-1001', amount=450, note='approval needed per policy')
    9. [billing-agent] send_email(to='kim@example.com', body='Refund of $450 issued for A-1001.')
   10. [billing-agent] message to orchestrator: {"order_id": "A-1001", "refunded": 450}
   11. [orchestrator] message to customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
@@ -51,136 +195,11 @@ final answer: "Your refund of $450 for order A-1001 has been issued."
   order status is refunded      PASS  status=refunded
 -- grade 2: each handoff (the right agent, and each fact the next agent needs) --
   route (who got the work)      PASS  step 2: policy-agent, step 6: billing-agent
-  orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
-  orchestrator -> billing-agent FAIL  step 6: needs_approval: knew True, sent '<missing>'
--- grade 3: the outcome, checked against the customer's intention --
-  reply names order and amount  PASS  mentions A-1001, 450
--- failure attribution (walk the tree in time order) --
-  first wrong step: step 6, owner orchestrator, handoff to billing-agent
-    - needs_approval: knew True, sent '<missing>'
-  first broken rule: step 7, by billing-agent, issue_refund (refund before approval)
-  cause: orchestrator, step 6 (handoff to billing-agent). symptom: billing-agent's issue_refund at step 7
-
-=== Replay: billing alone, given the fact it was missing ===
-  handoff as sent:     {"order_id": "A-1001", "amount": 450, "email": "kim@example.com", "refundable": true}
-  with fact restored:  {"order_id": "A-1001", "amount": 450, "email": "kim@example.com", "refundable": true, "needs_approval": true}
-  billing now calls: request_approval, issue_refund, send_email
-  billing path                  PASS  2 of 2 in order
-  approval before refund        PASS  approval 09:00:01, refund 09:00:02
-
-=== Run B: the correct system ===
-customer: "Order A-1001 arrived damaged, photo attached."
-trace: 3 invoke_agent, 10 chat, 5 execute_tool spans -> traces/run_b.json
-span tree (the stand-in's chat spans carry no content):
-  invoke_agent orchestrator
-    [event agent.message] customer -> orchestrator: {"order_id": "A-1001", "reason": "damaged", "text": "Order A-1001 arrived damaged, photo attached."}
-    chat scripted-stand-in
-    invoke_agent policy-agent
-      [event agent.message] orchestrator -> policy-agent: {"order_id": "A-1001", "reason": "damaged"}
-      chat scripted-stand-in
-      execute_tool get_order  args={"order_id": "A-1001"}  result={"order_id": "A-1001", "email": "kim@example.com", "amount": 450, "status": "delivered"}
-      chat scripted-stand-in
-      execute_tool check_policy  args={"order_id": "A-1001", "reason": "damaged"}  result={"refundable": true, "needs_approval": true}
-      chat scripted-stand-in
-      [event agent.message] policy-agent -> orchestrator: {"order_id": "A-1001", "email": "kim@example.com", "amount": 450, "refundable": true, "needs_approval": true}
-    chat scripted-stand-in
-    invoke_agent billing-agent
-      [event agent.message] orchestrator -> billing-agent: {"order_id": "A-1001", "amount": 450, "email": "kim@example.com", "refundable": true, "needs_approval": true}
-      chat scripted-stand-in
-      execute_tool request_approval  args={"order_id": "A-1001", "amount": 450, "note": "approval needed per policy"}  result={"approved": true}
-      chat scripted-stand-in
-      execute_tool issue_refund  args={"order_id": "A-1001", "amount": 450}  result={"refunded": 450}
-      chat scripted-stand-in
-      execute_tool send_email  args={"to": "kim@example.com", "body": "Refund of $450 issued for A-1001."}  result={"sent": true}
-      chat scripted-stand-in
-      [event agent.message] billing-agent -> orchestrator: {"order_id": "A-1001", "refunded": 450}
-    chat scripted-stand-in
-    [event agent.message] orchestrator -> customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
-steps rebuilt from the spans, in time order:
-   1. [customer] message to orchestrator: {"order_id": "A-1001", "reason": "damaged", "text": "Order A-1001 arrived damaged, photo attached."}
-   2. [orchestrator] message to policy-agent: {"order_id": "A-1001", "reason": "damaged"}
-   3. [policy-agent] get_order(order_id='A-1001')
-   4. [policy-agent] check_policy(order_id='A-1001', reason='damaged')
-   5. [policy-agent] message to orchestrator: {"order_id": "A-1001", "email": "kim@example.com", "amount": 450, "refundable": true, "needs_approval": true}
-   6. [orchestrator] message to billing-agent: {"order_id": "A-1001", "amount": 450, "email": "kim@example.com", "refundable": true, "needs_approval": true}
-   7. [billing-agent] request_approval(order_id='A-1001', amount=450, note='approval needed per policy')
-   8. [billing-agent] issue_refund(order_id='A-1001', amount=450)
-   9. [billing-agent] send_email(to='kim@example.com', body='Refund of $450 issued for A-1001.')
-  10. [billing-agent] message to orchestrator: {"order_id": "A-1001", "refunded": 450}
-  11. [orchestrator] message to customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
-final answer: "Your refund of $450 for order A-1001 has been issued."
--- grade 1: each agent's path (in order, a rule per argument) --
-  policy-agent path             PASS  2 of 2 in order  [get_order, check_policy]
-  billing-agent path            PASS  2 of 2 in order  [request_approval, issue_refund, send_email]
-  judge (stub) on reason: 'damaged' vs 'damaged' -> same meaning
--- grade 1, billing's tools: what they wrote to SQLite --
-  one refund row of 450         PASS  refunds=[450]
-  one approval row of 450       PASS  approvals=[450]
-  approval before refund        PASS  approval 09:00:01, refund 09:00:02
-  order status is refunded      PASS  status=refunded
--- grade 2: each handoff (the right agent, and each fact the next agent needs) --
-  route (who got the work)      PASS  step 2: policy-agent, step 6: billing-agent
-  orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
-  orchestrator -> billing-agent PASS  step 6: carries order_id, amount, email, needs_approval
--- grade 3: the outcome, checked against the customer's intention --
-  reply names order and amount  PASS  mentions A-1001, 450
--- failure attribution (walk the tree in time order) --
-  none: every handoff carries what the next agent needs, and no rule is broken
-
-=== Run C (control): full handoff, billing ignores the flag ===
-customer: "Order A-1001 arrived damaged, photo attached."
-trace: 3 invoke_agent, 10 chat, 5 execute_tool spans -> traces/run_c.json
-span tree (the stand-in's chat spans carry no content):
-  invoke_agent orchestrator
-    [event agent.message] customer -> orchestrator: {"order_id": "A-1001", "reason": "damaged", "text": "Order A-1001 arrived damaged, photo attached."}
-    chat scripted-stand-in
-    invoke_agent policy-agent
-      [event agent.message] orchestrator -> policy-agent: {"order_id": "A-1001", "reason": "damaged"}
-      chat scripted-stand-in
-      execute_tool get_order  args={"order_id": "A-1001"}  result={"order_id": "A-1001", "email": "kim@example.com", "amount": 450, "status": "delivered"}
-      chat scripted-stand-in
-      execute_tool check_policy  args={"order_id": "A-1001", "reason": "damaged"}  result={"refundable": true, "needs_approval": true}
-      chat scripted-stand-in
-      [event agent.message] policy-agent -> orchestrator: {"order_id": "A-1001", "email": "kim@example.com", "amount": 450, "refundable": true, "needs_approval": true}
-    chat scripted-stand-in
-    invoke_agent billing-agent
-      [event agent.message] orchestrator -> billing-agent: {"order_id": "A-1001", "amount": 450, "email": "kim@example.com", "refundable": true, "needs_approval": true}
-      chat scripted-stand-in
-      execute_tool issue_refund  args={"order_id": "A-1001", "amount": 450}  result={"refunded": 450}
-      chat scripted-stand-in
-      execute_tool request_approval  args={"order_id": "A-1001", "amount": 450, "note": "filed after refund for audit"}  result={"approved": true}
-      chat scripted-stand-in
-      execute_tool send_email  args={"to": "kim@example.com", "body": "Refund of $450 issued for A-1001."}  result={"sent": true}
-      chat scripted-stand-in
-      [event agent.message] billing-agent -> orchestrator: {"order_id": "A-1001", "refunded": 450}
-    chat scripted-stand-in
-    [event agent.message] orchestrator -> customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
-steps rebuilt from the spans, in time order:
-   1. [customer] message to orchestrator: {"order_id": "A-1001", "reason": "damaged", "text": "Order A-1001 arrived damaged, photo attached."}
-   2. [orchestrator] message to policy-agent: {"order_id": "A-1001", "reason": "damaged"}
-   3. [policy-agent] get_order(order_id='A-1001')
-   4. [policy-agent] check_policy(order_id='A-1001', reason='damaged')
-   5. [policy-agent] message to orchestrator: {"order_id": "A-1001", "email": "kim@example.com", "amount": 450, "refundable": true, "needs_approval": true}
-   6. [orchestrator] message to billing-agent: {"order_id": "A-1001", "amount": 450, "email": "kim@example.com", "refundable": true, "needs_approval": true}
-   7. [billing-agent] issue_refund(order_id='A-1001', amount=450)
-   8. [billing-agent] request_approval(order_id='A-1001', amount=450, note='filed after refund for audit')
-   9. [billing-agent] send_email(to='kim@example.com', body='Refund of $450 issued for A-1001.')
-  10. [billing-agent] message to orchestrator: {"order_id": "A-1001", "refunded": 450}
-  11. [orchestrator] message to customer: {"answer": "Your refund of $450 for order A-1001 has been issued."}
-final answer: "Your refund of $450 for order A-1001 has been issued."
--- grade 1: each agent's path (in order, a rule per argument) --
-  policy-agent path             PASS  2 of 2 in order  [get_order, check_policy]
-  billing-agent path            FAIL  step 1: got issue_refund, want request_approval  [issue_refund, request_approval, send_email]
-  judge (stub) on reason: 'damaged' vs 'damaged' -> same meaning
--- grade 1, billing's tools: what they wrote to SQLite --
-  one refund row of 450         PASS  refunds=[450]
-  one approval row of 450       PASS  approvals=[450]
-  approval before refund        FAIL  approval 09:00:02, refund 09:00:01
-  order status is refunded      PASS  status=refunded
--- grade 2: each handoff (the right agent, and each fact the next agent needs) --
-  route (who got the work)      PASS  step 2: policy-agent, step 6: billing-agent
-  orchestrator -> policy-agent  PASS  step 2: carries order_id, reason
-  orchestrator -> billing-agent PASS  step 6: carries order_id, amount, email, needs_approval
+  orchestrator -> policy-agent  PASS  step 2: as the sender knew: order_id, reason
+  policy-agent -> orchestrator  PASS  step 5: as the sender knew: order_id, amount, email, approval='before refund'
+  orchestrator -> billing-agent PASS  step 6: as the sender knew: order_id, amount, email, approval='before refund'
+  judge (stub) on approval, step 5: 'approve it before' -> before refund
+  judge (stub) on approval, step 6: 'approval first' -> before refund
 -- grade 3: the outcome, checked against the customer's intention --
   reply names order and amount  PASS  mentions A-1001, 450
 -- failure attribution (walk the tree in time order) --
@@ -201,7 +220,7 @@ Trap 2: reference approve, refund. Run refund, approve, refund.
   fixed in-order                FAIL  step 1: got issue_refund, want request_approval
 
 === pass^k over 8 repeated runs ===
-Stand-in for a flaky orchestrator: each run drops the approval flag from the billing handoff with probability 0.25 (random.Random(2026)).
+Stand-in for a flaky policy agent: each run's answer leaves out the approval with probability 0.25 (random.Random(2026)).
 run results (P = all three grades pass): F P P P F F P P
 c = 5 passes out of n = 8
   k=1:  pass^k = 0.625   pass@k = 0.625

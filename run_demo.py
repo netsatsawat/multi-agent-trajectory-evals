@@ -9,10 +9,11 @@ import json
 import random
 
 import agents as A
+import attribution
 import scorers as S
 import tracing as T
 from attribution import (
-    NEEDS, attribute_failure, handoff_gaps, steps_from_spans)
+    NEEDS, attribute_failure, handoff_gaps, steps_from_spans, use_needs)
 from passk import pass_at_k, pass_hat_k
 from routing import wrong_route
 from traps import greedy_in_order, naive_contains_all
@@ -135,21 +136,34 @@ def route_check(steps, want, router=A.ORCH):
 
 def handoff_checks(steps):
     """Track facts the way attribute_failure() does and print a verdict
-    for each handoff to an agent listed in NEEDS."""
-    known, all_ok = {}, True
+    for each message whose (sender, receiver) pair is listed in NEEDS.
+    Then print what the stand-in judge read about approval in each of
+    those messages that is plain text."""
+    known, all_ok, readings = {}, True, []
     for n, st in enumerate(steps, 1):
         if st["kind"] == "tool":
-            known.setdefault(st["agent"], {}).update(st["result"])
+            known.setdefault(st["agent"], {}).update(
+                S.read_facts(st["result"]))
             continue
-        if st["to"] in NEEDS:
-            gaps = handoff_gaps(st, known.get(st["agent"], {}))
+        S.APPROVAL_LOG.clear()
+        sent = S.read_facts(st["facts"])
+        pair = (st["agent"], st["to"])
+        if pair in NEEDS:
+            gaps = handoff_gaps(st, known.get(st["agent"], {}), sent)
             label = f"{st['agent']} -> {st['to']}"
-            need = ", ".join(NEEDS[st["to"]])
+            # On a pass, print the approval the message passed on, so a
+            # brief that passes on "none" shows it.
+            need = ", ".join(f"{k}={sent[k]!r}" if k == "approval" else k
+                             for k in NEEDS[pair])
             line(label, not gaps,
                  f"step {n}: " + ("; ".join(gaps) if gaps
-                                  else f"carries {need}"))
+                                  else f"as the sender knew: {need}"))
             all_ok = all_ok and not gaps
-        known.setdefault(st["to"], {}).update(st["facts"])
+            readings += [(n, hit, ans) for hit, ans in S.APPROVAL_LOG]
+        known.setdefault(st["to"], {}).update(sent)
+    for n, hit, ans in readings:
+        found = repr(hit) if hit else "no approval phrase"
+        print(f"  judge (stub) on approval, step {n}: {found} -> {ans}")
     return all_ok
 
 
@@ -163,7 +177,7 @@ def final_answer_from(steps):
 def print_attribution(steps):
     """Print who caused the failure (the cause) and where it showed
     (the symptom), in plain words."""
-    cause, symptom = attribute_failure(steps)
+    cause, symptom = attribute_failure(steps, S.read_facts)
     if cause is None:
         print("  none: every handoff carries what the next agent needs,"
               " and no rule is broken")
@@ -187,11 +201,10 @@ def print_attribution(steps):
 
 # ---- one run -------------------------------------------------------------
 
-def score_run(title, request, handoff_keys, trace_file, **kw):
+def score_run(title, request, trace_file, **kw):
     print(f"\n=== {title} ===")
     print(f'customer: "{request["text"]}"')
-    db, answer, spans = A.run_system(
-        request, handoff_keys, f"conv_{trace_file}", **kw)
+    db, answer, spans = A.run_system(request, f"conv_{trace_file}", **kw)
     T.save_json(spans, f"traces/{trace_file}.json")
     counts = T.span_counts(spans)
     print(f"trace: {counts.get('invoke_agent', 0)} invoke_agent, "
@@ -229,25 +242,78 @@ def score_run(title, request, handoff_keys, trace_file, **kw):
     return steps, cause, symptom
 
 
-def replay_check(steps):
-    """Re-run billing alone with its handoff plus the fact it was missing.
+# The payload check keyed by receiver alone, as excerpt 2 was before
+# it listed policy's answer to the orchestrator. by_receiver writes such
+# a table with a key for every sender, so handoff_gaps can read it.
+BY_RECEIVER = {A.POLICY: ["order_id", "reason"],
+               A.BILLING: attribution.REFUND_FACTS}
+SENDERS = ["customer", A.ORCH, A.POLICY, A.BILLING]
 
-    If billing then asks for approval first, its early refund in the
-    failing run was a symptom of the orchestrator's dropped fact.
+
+def by_receiver(table):
+    return {(s, r): keys for r, keys in table.items() for s in SENDERS
+            if s != r}
+
+
+def keying_check(steps_a):
+    """Score the failing run and the correct run again with NEEDS keyed
+    by receiver alone, then keyed by sender and receiver.
+
+    Without a list for messages to the orchestrator, no check reads
+    policy's answer, and on the failing run the cause moves to billing,
+    the symptom. With one list for every message to the orchestrator,
+    even the correct run fails, at the customer's own request, because
+    the orchestrator needs different facts from each sender.
     """
-    print("\n=== Replay: billing alone, given the fact it was missing ===")
-    known, handoff = {}, None
-    for st in steps:
-        if st["kind"] == "message":
-            if st["agent"] == A.ORCH and st["to"] == A.BILLING:
-                handoff = dict(st["facts"])
-            known.setdefault(st["to"], {}).update(st["facts"])
-    restored = dict(handoff)
-    restored["needs_approval"] = known[A.ORCH]["needs_approval"]
-    print(f"  handoff as sent:     {json.dumps(handoff)}")
+    print("\n=== Runs A and B with the payload check keyed three ways ===")
+    _, _, spans_b = A.run_system(A.REQUEST, "conv_keying")
+    runs = [("failing run", steps_a),
+            ("correct run", steps_from_spans(spans_b))]
+    tables = [
+        ("keyed by receiver, nothing listed for the orchestrator",
+         by_receiver(BY_RECEIVER)),
+        ("keyed by receiver, one list for the orchestrator",
+         by_receiver({**BY_RECEIVER, A.ORCH: attribution.REFUND_FACTS})),
+        ("keyed by sender and receiver, as NEEDS is", NEEDS),
+    ]
+    for label, table in tables:
+        print(f"  {label}")
+        for name, steps in runs:
+            with use_needs(table):
+                cause = attribute_failure(steps, S.read_facts)[0]
+            if cause is None:
+                print(f"    {name}: cause none")
+                continue
+            n, who, what, _ = cause
+            print(f"    {name}: cause {who}, step {n} ({what})")
+
+
+def replay_check(steps):
+    """Put the approval sentence back into policy's answer and run the
+    case again on a fresh database. Policy's tools return what the
+    trace recorded, and the orchestrator and billing run again.
+
+    If billing then asks for approval first and every check passes, its
+    refund with no approval in the failing run was a symptom of the fact
+    policy's answer left out.
+    """
+    print("\n=== Replay: policy's answer with the approval sentence"
+          " put back ===")
+    request = steps[0]["facts"]
+    results = {st["tool"]: st["result"] for st in steps
+               if st["kind"] == "tool" and st["agent"] == A.POLICY}
+    answer = next(st["facts"] for st in steps if st["kind"] == "message"
+                  and st["agent"] == A.POLICY and st["to"] == A.ORCH)
+    restored = f"{answer} {A.APPROVAL_LINE}"
+    print(f"  answer as sent:      {json.dumps(answer)}")
     print(f"  with fact restored:  {json.dumps(restored)}")
-    db, spans = A.replay_billing(restored, "conv_replay")
-    calls = calls_by_agent(steps_from_spans(spans))[A.BILLING]
+    db, spans = A.replay_from_answer(request, results, restored,
+                                     "conv_replay")
+    replayed = steps_from_spans(spans)
+    brief = next(st["facts"] for st in replayed if st["kind"] == "message"
+                 and st["agent"] == A.ORCH and st["to"] == A.BILLING)
+    print(f"  orchestrator now writes: {json.dumps(brief)}")
+    calls = calls_by_agent(replayed)[A.BILLING]
     print("  billing now calls: "
           + ", ".join(c["tool"] for c in calls))
     ok, step, why = S.in_order(REFS[A.BILLING], calls, S.stub_judge)
@@ -255,6 +321,10 @@ def replay_check(steps):
     for label, ok, detail in S.billing_rows(db, OID, AMOUNT):
         if label == "approval before refund":
             line(label, ok, detail)
+    cause = attribute_failure(replayed, S.read_facts)[0]
+    line("every check, all three grades", system_passes(db, replayed),
+         "cause: none" if cause is None
+         else f"cause: {cause[1]}, step {cause[0]}")
 
 
 # ---- matcher traps and pass^k (kept from the single-agent harness) ------
@@ -299,20 +369,20 @@ def system_passes(db, steps):
     outcome_ok = S.final_answer_check(final_answer_from(steps),
                                       [OID, str(AMOUNT)])[0]
     return (paths and route_ok and tools and outcome_ok
-            and attribute_failure(steps)[0] is None)
+            and attribute_failure(steps, S.read_facts)[0] is None)
 
 
 def repeated_runs(n=8, seed=2026, p_bad=0.25):
     print(f"\n=== pass^k over {n} repeated runs ===")
-    print(f"Stand-in for a flaky orchestrator: each run drops the approval"
-          f" flag from the billing handoff with probability {p_bad}"
+    print(f"Stand-in for a flaky policy agent: each run's answer leaves"
+          f" out the approval with probability {p_bad}"
           f" (random.Random({seed})).")
     rng = random.Random(seed)
     results = []
     for _ in range(n):
-        keys = (A.HANDOFF_DROPS_FLAG if rng.random() < p_bad
-                else A.HANDOFF_COMPLETE)
-        db, _, spans = A.run_system(A.REQUEST_B, keys, "conv_rep")
+        reports = rng.random() >= p_bad      # one draw per run
+        db, _, spans = A.run_system(A.REQUEST, "conv_rep",
+                                    reports_approval=reports)
         results.append(system_passes(db, steps_from_spans(spans)))
     marks = " ".join("P" if r else "F" for r in results)
     print(f"run results (P = all three grades pass): {marks}")
@@ -324,13 +394,13 @@ def repeated_runs(n=8, seed=2026, p_bad=0.25):
 
 if __name__ == "__main__":
     steps_a, _, _ = score_run(
-        "Run A: the orchestrator drops the approval flag",
-        A.REQUEST_A, A.HANDOFF_DROPS_FLAG, "run_a")
+        "Run A: the policy agent's answer leaves out the approval",
+        A.REQUEST, "run_a", reports_approval=False)
+    keying_check(steps_a)
     replay_check(steps_a)
-    score_run("Run B: the correct system",
-              A.REQUEST_B, A.HANDOFF_COMPLETE, "run_b")
-    score_run("Run C (control): full handoff, billing ignores the flag",
-              A.REQUEST_B, A.HANDOFF_COMPLETE, "run_c",
-              heeds_approval_flag=False)
+    score_run("Run B: the correct system", A.REQUEST, "run_b")
+    score_run("Run C (control): the brief says approval first,"
+              " billing refunds first anyway",
+              A.REQUEST, "run_c", heeds_approval=False)
     traps()
     repeated_runs()

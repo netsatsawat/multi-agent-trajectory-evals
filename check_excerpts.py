@@ -16,6 +16,7 @@ from pathlib import Path
 import agents as A
 import attribution
 import routing
+import scorers as S
 import sequence
 import team as TM
 
@@ -59,10 +60,9 @@ def main():
         Path(f"excerpts/excerpt_{n}.py").write_text(code + "\n")
 
     # Record real OpenTelemetry spans from three runs of the agents.
-    _, _, bad = A.run_system(A.REQUEST_A, A.HANDOFF_DROPS_FLAG, "x1")
-    _, _, good = A.run_system(A.REQUEST_B, A.HANDOFF_COMPLETE, "x2")
-    _, _, ctrl = A.run_system(A.REQUEST_B, A.HANDOFF_COMPLETE, "x3",
-                              heeds_approval_flag=False)
+    _, _, bad = A.run_system(A.REQUEST, "x1", reports_approval=False)
+    _, _, good = A.run_system(A.REQUEST, "x2")
+    _, _, ctrl = A.run_system(A.REQUEST, "x3", heeds_approval=False)
 
     ns = {}
     # Excerpt 1 runs alone. It rebuilds the steps in time order and
@@ -73,44 +73,75 @@ def main():
     who = [(s["agent"], s.get("tool") or "msg->" + s["to"])
            for s in steps]
     print(f"excerpt 1  steps_from_spans(failing run) -> {who}")
+    assert who[4] == (A.POLICY, "msg->" + A.ORCH)
     assert who[5] == (A.ORCH, "msg->" + A.BILLING)
     assert who[6] == (A.BILLING, "issue_refund")
-    assert len(steps) == 11
+    assert len(steps) == 10
 
     # Excerpt 2 runs with only excerpt 1 before it and checks handoffs.
+    # The facts each sender knew come from its tool results and the
+    # messages it received, read with scorers.read_facts.
     run_excerpt(2, blocks[1], ns)
-    handoff = steps[5]
-    known = {**steps[4]["facts"]}      # what policy told the orchestrator
-    gaps = ns["handoff_gaps"](handoff, known)
-    print(f"excerpt 2  handoff_gaps(failing handoff) -> {gaps}")
-    assert gaps == ["needs_approval: knew True, sent '<missing>'"]
-    good_steps = ns["steps_from_spans"](good)
-    gaps = ns["handoff_gaps"](good_steps[5], good_steps[4]["facts"])
-    print(f"excerpt 2  handoff_gaps(correct handoff) -> {gaps}")
+    read = S.read_facts
+
+    def knew(steps, agent, upto):
+        known = {}
+        for st in steps[:upto]:
+            if st["kind"] == "tool" and st["agent"] == agent:
+                known.update(read(st["result"]))
+            elif st["kind"] == "message" and st["to"] == agent:
+                known.update(read(st["facts"]))
+        return known
+
+    def gaps_at(steps, i):
+        st = steps[i]
+        return ns["handoff_gaps"](st, knew(steps, st["agent"], i),
+                                  read(st["facts"]))
+
+    gaps = gaps_at(steps, 4)
+    print(f"excerpt 2  handoff_gaps(policy's answer, step 5) -> {gaps}")
+    assert gaps == ["approval: knew 'before refund', sent 'none'"]
+    gaps = gaps_at(steps, 5)
+    print(f"excerpt 2  handoff_gaps(orchestrator's brief, step 6) -> {gaps}")
     assert gaps == []
+    good_steps = ns["steps_from_spans"](good)
+    gaps = [gaps_at(good_steps, 4), gaps_at(good_steps, 5)]
+    print(f"excerpt 2  handoff_gaps(correct run, steps 5 and 6) -> {gaps}")
+    assert gaps == [[], []]
 
     # Excerpt 3 runs with excerpts 1 and 2 before it and finds the
     # agent that caused the failure.
     run_excerpt(3, blocks[2], ns)
-    cause, symptom = ns["attribute_failure"](steps)
+    reads = []
+
+    def counted(content):
+        reads.append(content)
+        return read(content)
+
+    cause, symptom = ns["attribute_failure"](steps, counted)
     print(f"excerpt 3  attribute_failure(failing run) -> cause {cause}")
     print(f"{'symptom':>52} {symptom}")
-    assert cause[:3] == (6, A.ORCH, "handoff to " + A.BILLING)
+    assert cause == (5, A.POLICY, "handoff to " + A.ORCH,
+                     ["approval: knew 'before refund', sent 'none'"])
     assert symptom == (7, A.BILLING, "issue_refund",
                        ["refund before approval"])
-    r = ns["attribute_failure"](good_steps)
+    print(f"excerpt 3  read() calls on the failing run: {len(reads)},"
+          f" one per step")
+    assert len(reads) == len(steps)
+    r = ns["attribute_failure"](good_steps, read)
     print(f"excerpt 3  attribute_failure(correct run) -> {r}")
     assert r == (None, None)
-    r = ns["attribute_failure"](ns["steps_from_spans"](ctrl))
-    print("excerpt 3  attribute_failure(control: billing ignores the"
-          f" flag) -> {r}")
-    assert r[0] == r[1] and r[0][1] == A.BILLING
+    r = ns["attribute_failure"](ns["steps_from_spans"](ctrl), read)
+    print("excerpt 3  attribute_failure(control: billing refunds first"
+          f" anyway) -> {r}")
+    assert r[0] == r[1] and r[0][:2] == (7, A.BILLING)
 
     # The excerpts must agree with attribution.py, which the demo imports.
     for spans in (bad, good, ctrl):
-        mine = ns["attribute_failure"](ns["steps_from_spans"](spans))
+        mine = ns["attribute_failure"](ns["steps_from_spans"](spans),
+                                       read)
         theirs = attribution.attribute_failure(
-            attribution.steps_from_spans(spans))
+            attribution.steps_from_spans(spans), read)
         assert mine == theirs
     print("excerpts match the harness: OK")
 

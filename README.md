@@ -8,19 +8,20 @@ each run on three things, then names the agent that caused the failure:
 
 1. Each agent's path: the right tools with the right arguments, in an order that works, with
    the right effects.
-2. Each handoff, the message that passes work to the next agent: the right agent gets the work,
-   with the facts it needs.
+2. Each handoff, the message that passes work to the next agent or reports back to the agent
+   that asked: the right agent gets it, with the facts it needs.
 3. The outcome, checked against the customer's intention. The intention is what the customer
    wants, and the outcome is what the agentic AI system produces.
 
-![The opening refund scored on every check. In the failing run, billing's path and the handoff to billing fail, the reply passes, and the cause is the orchestrator at step 6](assets/scored-run.png)
+![The opening refund scored on every check. In the failing run, billing's path, billing's approval rows and the policy agent's answer to the orchestrator fail, the reply passes, and the cause is the policy agent at step 5](assets/scored-run.png)
 
-In the opening case, a customer asks for a $450 refund on order A-1001. Policy reports that the
-refund needs approval. In run A, the orchestrator leaves that flag out of its handoff to
-billing, so billing refunds before it asks for approval. The reply is still right. Billing made
-the visible mistake, but the orchestrator caused it. A grader that checks only the agent whose
-action looks wrong names billing, and you fix billing while the orchestrator keeps dropping the
-flag.
+In the opening case, a customer asks for a $450 refund on order A-1001. The policy agent's
+rules tool says a manager must approve it, but the policy agent answers the orchestrator in
+plain text and leaves the approval out. So the orchestrator passes on only what it was told, and
+billing refunds without asking for approval. The reply is still right. Billing made the visible
+mistake, but the policy agent caused it. If the payload check never reads the answers agents
+send back, failure attribution names billing, and you fix billing while the policy agent keeps
+leaving the approval out.
 
 The agents are scripted Python stand-ins and every case is made up, so it all runs offline with
 no model and no API key. The checks read OpenTelemetry spans, so they also work on your own
@@ -39,10 +40,12 @@ uv venv --python 3.12 && uv pip install -r requirements.txt
 Without uv, run `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`. The
 only dependency is the OpenTelemetry SDK, pinned to 1.45.0.
 
-- `run_demo.py` prints the opening refund. Run A drops the flag, run B is the correct system,
-  and run C is a control where billing ignores the flag. Each run gets its span tree, its steps,
-  every check and the cause. Then come the replay, two matcher traps and pass^k over eight runs.
-  It also saves the spans of runs A, B and C to `traces/`.
+- `run_demo.py` prints the opening refund. Run A, where the policy agent's answer leaves out the
+  approval, comes first, then a rescore of runs A and B with the payload check keyed three ways,
+  and the replay. Run B is the correct system, and run C is a control where billing ignores the
+  approval it was told about. Each run gets its span tree, its steps, every check and the cause.
+  Two matcher traps and pass^k over eight runs close the output. It also saves the spans of runs
+  A, B and C to `traces/`.
 - `run_ext.py` prints the cases for a bigger four-agent team: one refund in seven tool orders,
   a test of the order checkers on all 120 orders of billing's tools, a request sent to the wrong
   agent, every route forced on one case per intention, 12 requests through a keyword router, and
@@ -65,7 +68,7 @@ Each grade breaks into one to three measures, and each measure has its own small
 | 1b. Right order | `order_gaps` and a dependency graph | Pass rate, pass^k and the first broken edge | A blender refund (B-2002) |
 | 1c. Right effects | `billing_rows`, `tool_effects` | Pass rate per check | A-1001 and B-2002 |
 | 2a. Right agent (routing) | `wrong_route` | On sampled cases: accuracy with an interval, routes taken per intention, what each wrong route did | A damaged parcel (C-3003), 12 requests |
-| 2b. Right payload | `handoff_gaps` | Pass rate per handoff | A-1001 |
+| 2b. Right payload | `handoff_gaps`, with `read_facts` for text | Pass rate per handoff | A-1001 |
 | 3. The outcome against the intention | `final_answer_check`, or a judge | Pass rate and pass^k | C-3003 |
 | Failure attribution | `attribute_failure`, `first_wrong` | The cause and symptom of each failing run, confirmed by a person | A-1001, B-2002, C-3003 |
 
@@ -159,12 +162,14 @@ sent twice passes.
 ### 1c. Right effects
 
 The tool checks read what changed: the rows, the amounts, the card and the email text. The
-reply can be right while these are wrong. For A-1001, `billing_rows` in `scorers.py` expects one approval and one refund of 450, the approval
-first, and the order marked refunded. In run A, the refund row is stamped 09:00:01 and the
-approval 09:00:02, so the approval-before-refund check fails. For B-2002, `tool_effects` in
-`run_ext.py` expects one $240 refund to the card that paid, an approval before it, a receipt
-that says $240 and one case note. The rows show the order only because a fake clock stamps
-each one, so if your backend keeps no write times, only the trajectory shows it.
+reply can be right while these are wrong. For A-1001, `billing_rows` in `scorers.py` expects
+one approval and one refund of 450, the approval first, and the order marked refunded. In run
+A, billing never asks, so the approval row is missing. In run C, the control, the refund is
+stamped 09:00:01 and the approval 09:00:02. Those are the same rows as a good run, so only the
+approval-before-refund check fails. For B-2002, `tool_effects` in `run_ext.py` expects one $240
+refund to the card that paid, an approval before it, a receipt that says $240 and one case note.
+The rows show the order only because a fake clock stamps each one, so if your backend keeps no
+write times, only the trajectory shows it.
 
 ## Grade 2: each handoff
 
@@ -224,15 +229,38 @@ routing as accuracy against decisions that people labelled by hand.
 
 ### 2b. Right payload
 
-The payload is the output from one agent that becomes the input to the next agent.
-`handoff_gaps` in `attribution.py` (excerpt 2) checks that each fact the receiver needs, listed
-in `NEEDS`, arrives with the value the sender knew by then. In run A, policy tells the
-orchestrator `needs_approval: true` at step 5. The handoff to billing at step 6 leaves it out,
-so the check prints `needs_approval: knew True, sent '<missing>'`.
+The payload is the output from one agent that becomes the input to the next agent, including the
+answer an agent sends back to the agent that called it. `handoff_gaps` in `attribution.py`
+(excerpt 2) checks that each fact the receiver needs arrives with the value the sender knew by
+then. `NEEDS` lists those facts by sender and receiver:
+
+```python
+REFUND_FACTS = ["order_id", "amount", "email", "approval"]
+NEEDS = {  # (sender, receiver): the facts the receiver needs
+    ("orchestrator", "policy-agent"): ["order_id", "reason"],
+    ("policy-agent", "orchestrator"): REFUND_FACTS,
+    ("orchestrator", "billing-agent"): REFUND_FACTS,
+}
+```
+
+In run A, the policy agent's `check_policy` result at step 4 says `needs_approval: true`, which
+the check reads as "before refund". Its answer at step 5 says nothing about approval, so the
+check prints `approval: knew 'before refund', sent 'none'`. The orchestrator's message to
+billing at step 6 passes, because it passed on all it knew. Only the policy agent's rules tool
+knows the $100 limit. Some real frameworks pass work this way too: LangChain's
+[supervisor tutorial](https://docs.langchain.com/oss/python/langchain/supervisor) and the
+handoff orchestration in
+[Microsoft Agent Framework](https://github.com/microsoft/agent-framework/blob/fd52de71579162a888fb2dd7510c57c6014dcdfc/python/packages/orchestrations/agent_framework_orchestrations/_handoff.py#L418-L452)
+both pass on what an agent writes, not its tool results.
+
+Plain-text messages go through `read_facts` in `scorers.py`. Code reads the order ID, the
+amount and the email. For approval, a model judge would answer one closed question: what does
+this message say about manager approval? Here a phrase table written for the scripted messages
+stands in for that judge.
 
 What a receiver needs depends on the job. Billing needs four facts after a policy verdict but
 only the order ID for a double charge, so `needs_for` in `team.py` swaps in each case's list.
-The check knows only the agents each job needs. C-3003's handoff to shipping passes it with
+The check knows only the handoffs each job needs. C-3003's handoff to shipping passes it with
 nothing to check.
 
 ## Grade 3: the outcome, checked against the customer's intention
@@ -245,12 +273,12 @@ refund intention. A reply that names the ID and the amount but turns the refund 
 pass, so use a judge for this check in your own tests.
 
 Run each case more than once. `run_demo.py` runs the opening refund eight times with a flaky
-orchestrator that drops the flag one time in four. With a fixed random seed, the same five runs
-pass all three grades every time. Pass^k is the chance that all k runs pass when you pick k of
-the eight at random. `passk.py` uses tau-bench's formula, C(c, k) / C(n, k), with n = 8 runs
-and c = 5 passes. At k = 1 it gives 0.625, the plain pass rate. At k = 8 it gives 0.000.
-Pass@k, the chance that at least one passes, reaches 1.000 at k = 4, because with three
-failures any four runs include a pass.
+policy agent that leaves the approval out of its answer one time in four. With a fixed random
+seed, the same five runs pass all three grades every time. Pass^k is the chance that all k runs
+pass when you pick k of the eight at random. `passk.py` uses tau-bench's formula,
+C(c, k) / C(n, k), with n = 8 runs and c = 5 passes. At k = 1 it gives 0.625, the plain pass
+rate. At k = 8 it gives 0.000. Pass@k, the chance that at least one passes, reaches 1.000 at
+k = 4, because with three failures any four runs include a pass.
 
 ## Which agent caused the failure?
 
@@ -261,8 +289,29 @@ owner is the agent that made that call or sent that message. The first broken ru
 symptom when it comes later. For run A, `run_demo.py` prints:
 
 ```
-  cause: orchestrator, step 6 (handoff to billing-agent). symptom: billing-agent's issue_refund at step 7
+  cause: policy-agent, step 5 (handoff to orchestrator). symptom: billing-agent's issue_refund at step 7
 ```
+
+`run_demo.py` also scores runs A and B with `NEEDS` keyed three ways:
+
+```
+=== Runs A and B with the payload check keyed three ways ===
+  keyed by receiver, nothing listed for the orchestrator
+    failing run: cause billing-agent, step 7 (issue_refund)
+    correct run: cause none
+  keyed by receiver, one list for the orchestrator
+    failing run: cause customer, step 1 (handoff to orchestrator)
+    correct run: cause customer, step 1 (handoff to orchestrator)
+  keyed by sender and receiver, as NEEDS is
+    failing run: cause policy-agent, step 5 (handoff to orchestrator)
+    correct run: cause none
+```
+
+Keyed by receiver with nothing listed for the orchestrator, no check reads the policy agent's
+answer, and run A's cause moves to billing, the symptom. With one list for the orchestrator,
+even run B fails, because the orchestrator needs different facts from each sender. So check
+what each agent reports back, or failure attribution names the agent that acted, not the one
+that caused the failure.
 
 `order_gaps` and `wrong_route` return findings in the same shape, so `first_wrong` takes the
 earliest one under every rule. [Who&When](https://arxiv.org/abs/2505.00212) also takes the
@@ -271,10 +320,12 @@ and money rules alone name billing at step 8. The order check moves the cause to
 step 3. In the C-3003 run, the handoff and money rules find nothing, and the route check names
 the orchestrator at step 2.
 
-The replay confirms step 6 in run A. It runs billing alone on a fresh database with
-`needs_approval: true` put back into the handoff, and both of billing's failed checks pass. In
-run B, every check passes and no one is named. In run C, the control, the handoff carries the
-flag, billing refunds first anyway, and billing is named at step 7.
+The replay confirms step 5 in run A. It puts the approval sentence back into the policy agent's
+answer, has the policy agent's tools return what the trace recorded, and reruns the
+orchestrator and billing on a fresh database. Billing asks for approval first, and every check
+passes. In run B, every check passes and no one is named. In run C, the control, policy's answer
+and the message to billing both carry the approval rule, billing refunds first anyway, and
+billing is named at step 7.
 
 ## How it works
 
@@ -282,11 +333,14 @@ flag, billing refunds first anyway, and billing is named at step 7.
 
 Each run gets its own SQLite database and a fake clock, so every run writes the same timestamps.
 `agents.py` holds the three agents of the opening case, and `team.py` the four of the bigger
-team. Both record each run as OpenTelemetry spans that follow the GenAI semantic conventions.
-Each agent gets an `invoke_agent` span that holds its `chat` and `execute_tool` spans and the
-spans of any agent it calls. Each message between agents is a span event named `agent.message`.
+team. In `agents.py`, the policy agent answers in plain text, and the orchestrator writes
+billing's task from that answer alone. The orchestrator and billing read text with their own
+patterns, never `read_facts`. The agents in `team.py` pass dicts. Both files record each run as
+OpenTelemetry spans that follow the GenAI semantic conventions. Each agent gets an
+`invoke_agent` span that holds its `chat` and `execute_tool` spans and the spans of any agent it
+calls. Each message between agents is a span event named `agent.message`.
 
-![The failing run as a span tree. The orchestrator's handoff at step 6 is the first wrong step. Billing's refund at step 7 is the first broken rule, a symptom](assets/span-tree.png)
+![The failing run as a span tree. The policy agent's answer at step 5 is the first wrong step. Billing's refund at step 7 is the first broken rule, a symptom](assets/span-tree.png)
 
 ## Use it on your own agents
 
@@ -304,31 +358,38 @@ can fail CI.
    Google's ADK, for example, writes tool arguments and results under
    `gcp.vertex.agent.tool_call_args` and `gcp.vertex.agent.tool_response`.
 3. The GenAI conventions have no handoff event yet. Record every message between agents, replies
-   as well as handoffs, as an `agent.message` span event with `from`, `to` and the facts as JSON
-   in `content`, the way `_message_event` in `agents.py` does. `attribute_failure` learns what a
-   sender knew from the messages that reached it, so without policy's reply at step 5, it names
-   the orchestrator even in the correct run.
+   as well as handoffs, as an `agent.message` span event with `from`, `to` and the message as
+   JSON in `content`, a dict of facts or a string of text, the way `_message_event` in
+   `agents.py` does. `attribute_failure` learns what a sender knew from its tool results and the
+   messages that reached it, so without policy's answer at step 5, it names the orchestrator even
+   in the correct run.
 4. Label each case with the customer's intention and the expected route, like `EXPECT` in
    `team.py`. From that label, write the reference lists (`REFS`), a rule per argument
    (`ARG_POLICY`, where an unlisted argument must match exactly), the order graph (`AFTER`,
    `ONCE` and `OWNER`), what the tools must change (`billing_rows`, `tool_effects`), the facts
-   each receiver needs (`NEEDS`, with `needs_for` when one agent does two jobs) and your rules
-   for tool calls (`money_rule`). Without your own rules, `attribute_failure` only finds
-   handoffs that drop or change a fact.
-5. Test each checker on runs you know are wrong: the trap runs in `traps()` in `run_demo.py` for a matcher, every
-   order of one agent's tools for a graph (`checker_test` in `run_ext.py`), and runs you labelled
-   yourself before a model judge replaces `stub_judge`.
+   each receiver needs (`NEEDS`, keyed by sender and receiver, with `needs_for` when one agent
+   does two jobs) and your rules for tool calls (`money_rule`). Without your own rules,
+   `attribute_failure` only finds handoffs that drop or change a fact.
+5. Test each checker on runs you know are wrong: the trap runs in `traps()` in `run_demo.py` for
+   a matcher, every order of one agent's tools for a graph (`checker_test` in `run_ext.py`), and
+   runs you labelled yourself before a model judge replaces `stub_judge` or the phrase table in
+   `read_facts`.
 6. Score all three grades and run each case several times. Report pass^k next to the pass rate.
-7. Find the earliest wrong step with `first_wrong`. When it is a handoff, replay the receiving
-   agent alone with the missing fact put back. `replay_check` in `run_demo.py` only works for the
-   scripted billing agent, so write your own. Then fix one thing and add two tests to CI: the
-   recorded bad run must still fail, and the fixed system must pass every repeated run.
+7. Find the earliest wrong step with `first_wrong`. When it is a handoff, replay from that
+   message with the missing fact put back, make the tools before it return what the trace
+   recorded, and rerun the agents after it. `replay_check` in `run_demo.py` only works for the
+   scripted agents here, so write your own. Then fix one thing and add two tests to CI: the
+   recorded bad run must still fail, and the fixed system must pass every repeated run. For run
+   A, the fix is a required approval field in the policy agent's answer, which code, not a
+   model, copies into billing's input.
 
 ![The diagnosis loop. Capture spans, rebuild the steps, find the first wrong step, name the agent that took it, name the failure, replay the suspect step, then fix one thing and add two tests to CI](assets/diagnosis-loop.png)
 
 The code here runs boxes 1 to 4, and item 7 covers boxes 6 and 7. Box 5 is done by hand. You
 name the failure with a mode from [MAST](https://arxiv.org/abs/2503.13657), such as information
-withholding, so you can count how often each kind happens.
+withholding, so you can count how often each kind happens. MAST puts only 0.85% of the failures
+it found under information withholding. I picked run A because a test on the reply cannot see
+it.
 
 ## The limits
 
@@ -338,6 +399,9 @@ The 12 routing requests are made up, and `run_ext.py` prints no interval for the
 
 Every refund in `team.py` is above $100, so `money_rule` (approval before any refund) and the
 policy (approval above $100) always agree.
+
+The phrase table in `read_facts` knows only the scripted messages here. A model judge can read
+the same message another way.
 
 OpenTelemetry still marks the GenAI semantic conventions as Development. Pin the version of
 your instrumentation. An

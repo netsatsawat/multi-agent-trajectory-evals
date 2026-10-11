@@ -117,11 +117,14 @@ def billing_handoff(steps):
     known = {}
     for n, st in enumerate(steps, 1):
         if st["kind"] == "tool":
-            known.setdefault(st["agent"], {}).update(st["result"])
+            known.setdefault(st["agent"], {}).update(
+                S.read_facts(st["result"]))
             continue
+        sent = S.read_facts(st["facts"])
         if st["agent"] == ORCH and st["to"] == BILLING:
-            return n, st["facts"], handoff_gaps(st, known.get(ORCH, {}))
-        known.setdefault(st["to"], {}).update(st["facts"])
+            return n, st["facts"], handoff_gaps(
+                st, known.get(ORCH, {}), sent)
+        known.setdefault(st["to"], {}).update(sent)
     return None, {}, ["no handoff to billing"]
 
 
@@ -183,7 +186,7 @@ def tool_order():
                               f"needs_approval={facts['needs_approval']}"
                               " passed on as policy reported it"))
         line("reply names order and amount", out[0], out[1])
-        cause = attribute_failure(steps)[0]
+        cause = attribute_failure(steps, S.read_facts)[0]
         root = first_wrong(cause, *gaps)
         print(f"  cause from the handoff and money rules: {who(cause)}")
         print(f"  cause with the order check added: {who(root)}")
@@ -303,7 +306,7 @@ def causes(case, steps):
     """The cause from the handoff and money rules alone, and the cause
     with the routing and order checks added."""
     with TM.needs_for(case):
-        cause = attribute_failure(steps)[0]
+        cause = attribute_failure(steps, S.read_facts)[0]
     root = first_wrong(cause, wrong_route(steps, case["want"]),
                        *order_gaps(steps, after=case["after"],
                                    owner=TM.OWNER))
@@ -318,15 +321,17 @@ def handoff_facts(steps, needs, router=ORCH):
     known, gaps, unlisted = {}, [], []
     for n, st in enumerate(steps, 1):
         if st["kind"] == "tool":
-            known.setdefault(st["agent"], {}).update(st["result"])
+            known.setdefault(st["agent"], {}).update(
+                S.read_facts(st["result"]))
             continue
+        sent = S.read_facts(st["facts"])
         if st["agent"] == router and st["to"] != "customer":
-            if st["to"] in needs:
-                gaps += [f"step {n}: {g}" for g in
-                         handoff_gaps(st, known.get(router, {}))]
+            if (router, st["to"]) in needs:
+                gaps += [f"step {n}: {g}" for g in handoff_gaps(
+                    st, known.get(router, {}), sent)]
             else:
                 unlisted.append(st["to"])
-        known.setdefault(st["to"], {}).update(st["facts"])
+        known.setdefault(st["to"], {}).update(sent)
     return gaps, unlisted
 
 

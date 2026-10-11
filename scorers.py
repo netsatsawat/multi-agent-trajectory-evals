@@ -5,11 +5,13 @@ for each argument and the check on what billing's tools wrote to
 SQLite come unchanged from the single-agent harness. So does the
 in-order matcher, which avoids the bugs shown in traps.py. In this
 multi-agent harness, run_demo.py runs the in-order matcher once for
-each agent. The last function, final_answer_check, grades the outcome
-instead of the trajectory. It checks the outcome against the
-customer's intention.
+each agent. read_facts pulls the facts out of a message for the payload
+check, from a dict or from text. The last function, final_answer_check,
+grades the outcome instead of the trajectory. It checks the outcome
+against the customer's intention.
 """
 import json
+import re
 
 COMPARE, IGNORE, JUDGE = "compare", "ignore", "judge"
 ARG_POLICY = {
@@ -52,6 +54,61 @@ def stub_judge(name, want, got):
         got == want or got.lower() in SAME_MEANING.get(want, set()))
     JUDGE_LOG.append((name, got, want, ok))
     return ok
+
+
+# ---- reading the facts in a message ---------------------------------------
+# A message between agents can be a dict or plain text. read_facts turns
+# either into a dict of facts, so the payload check can compare them.
+# Code reads the order ID, the amount and the email. For the approval
+# rule, a real setup asks a model judge one closed question: what does
+# this message say about manager approval? The answers are "before
+# refund", "already given", "side task" and "none". This stand-in
+# answers from a fixed phrase table, so the run repeats exactly. Like
+# SAME_MEANING, the table only knows the scripted messages in agents.py.
+FACT_PATTERNS = {"order_id": r"\b([A-Z]-\d{4})\b", "amount": r"\$(\d+)",
+                 "email": r"([\w.]+@[\w.]+\w)"}
+APPROVAL_SAYS = [  # (answer, phrases). The first phrase found wins.
+    ("before refund", ["approve it before", "approval first"]),
+    ("already given", ["already approved"]),
+    ("side task", ["also file"]),
+]
+NO_APPROVAL = "none"
+APPROVAL_LOG = []   # (phrase found or None, answer), one per text read
+
+
+def read_approval(text):
+    """Answer the closed question about approval for one message."""
+    low = text.lower()
+    for answer, phrases in APPROVAL_SAYS:
+        hit = next((p for p in phrases if p in low), None)
+        if hit:
+            APPROVAL_LOG.append((hit, answer))
+            return answer
+    APPROVAL_LOG.append((None, NO_APPROVAL))
+    return NO_APPROVAL
+
+
+def read_facts(content):
+    """The facts in a message or a tool result, as a dict.
+
+    A dict is read as it is, and needs_approval becomes the fact
+    approval: "before refund" when true, because the business rule puts
+    approval before any money moves, and "none" when false. Text is read
+    with FACT_PATTERNS and the approval phrase table.
+    """
+    if isinstance(content, dict):
+        facts = dict(content)
+        if "needs_approval" in facts:
+            facts["approval"] = ("before refund" if facts["needs_approval"]
+                                 else NO_APPROVAL)
+        return facts
+    facts = {}
+    for key, pattern in FACT_PATTERNS.items():
+        m = re.search(pattern, content)
+        if m:
+            facts[key] = int(m.group(1)) if key == "amount" else m.group(1)
+    facts["approval"] = read_approval(content)
+    return facts
 
 
 def strict_judge(name, want, got):
