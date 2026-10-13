@@ -16,8 +16,12 @@ the system does:
 issue_refund still does not check for an approval, and it does not stop
 a second refund of the same order.
 
-This is a bigger version of the team in agents.py. There, check_policy
-reads the amount itself and billing has three tools. Here check_policy
+This team has its own business rule, separate from the opening case in
+agents.py: a manager must approve any refund over $100 before money
+moves. approval_rule below is its money rule, and needs_for swaps it in
+for attribution.money_rule, which checks the opening case's rule (no
+refund before the item comes back). It also has its own facts, with
+approval in place of return. Compared with agents.py, check_policy here
 takes the amount from get_order's result, billing has five tools, and a
 shipping agent joins.
 
@@ -37,6 +41,7 @@ from agents import ORCH, POLICY, BILLING
 from sequence import AFTER
 
 SHIPPING = "shipping-agent"
+APPROVAL_LIMIT = 100               # refunds above this need approval
 
 SCHEMA = """
 CREATE TABLE orders(
@@ -52,8 +57,8 @@ CREATE TABLE case_log(order_id TEXT, note TEXT, ts TEXT);
 
 # order_id, email, amount, status, number of card charges.
 # Every amount that can be refunded is over the $100 approval limit, so
-# money_rule in attribution.py, which wants an approval before any
-# refund, agrees with the policy on every case.
+# approval_rule below, which wants an approval before any refund,
+# agrees with the policy on every case.
 ORDERS = [
     ("B-2002", "lee@example.com", 240, "delivered", 1),
     ("C-3003", "ana@example.com", 160, "delivered", 1),
@@ -87,7 +92,13 @@ def schema_sql():
 
 def check_policy(db, clock, order_id, reason, amount):
     return {"refundable": reason.lower() in A.REFUNDABLE_REASONS,
-            "needs_approval": amount > A.APPROVAL_LIMIT}
+            "needs_approval": amount > APPROVAL_LIMIT}
+
+
+def request_approval(db, clock, order_id, amount, note=""):
+    db.execute("INSERT INTO approvals VALUES (?, ?, ?)",
+               (order_id, amount, clock.now()))
+    return {"approved": True}
 
 
 def get_payment(db, clock, order_id):
@@ -140,7 +151,7 @@ def reship_item(db, clock, order_id):
 TOOLS = {
     POLICY: {"get_order": A.get_order, "check_policy": check_policy},
     BILLING: {"get_payment": get_payment,
-              "request_approval": A.request_approval,
+              "request_approval": request_approval,
               "issue_refund": issue_refund,
               "send_receipt": send_receipt, "log_case": log_case},
     SHIPPING: {"get_shipment": get_shipment, "reship_item": reship_item},
@@ -208,7 +219,7 @@ def billing_agent(run, task, plan=None):
             return {"order_id": f["order_id"],
                     "billing": "no problem found"}
         f.update(amount=f["charged"],
-                 needs_approval=f["charged"] > A.APPROVAL_LIMIT)
+                 needs_approval=f["charged"] > APPROVAL_LIMIT)
         steps = REFUND_PLAN[1:]
     if plan is None:
         plan = [t for t in steps
@@ -309,9 +320,10 @@ REFUND_ROWS = {"approvals": 1, "refunds": 1, "outbox": 1, "case_log": 1}
 # The facts each receiver needs, keyed by (sender, receiver) as NEEDS
 # in attribution.py is. The handoffs here are dicts, so read_facts
 # reads them as they are, and needs_approval becomes the fact approval.
+REFUND_FACTS = ["order_id", "amount", "email", "approval"]
 REFUND_NEEDS = {(ORCH, POLICY): ["order_id", "reason"],
-                (POLICY, ORCH): attribution.REFUND_FACTS,
-                (ORCH, BILLING): attribution.REFUND_FACTS}
+                (POLICY, ORCH): REFUND_FACTS,
+                (ORCH, BILLING): REFUND_FACTS}
 EXPECT = {
     "refund": {
         "intent": "refund", "want": [POLICY, BILLING], "say": "amount",
@@ -379,15 +391,30 @@ CASES = [
 ]
 
 
+def approval_rule(step, approved):
+    """This team's money rule: approval before money moves. Returns a
+    reason or ''. It has the shape of attribution.money_rule."""
+    a = step["args"]
+    if step["tool"] == "request_approval":
+        approved[a["order_id"]] = a["amount"]
+    if step["tool"] == "issue_refund":
+        if approved.get(a["order_id"], 0) < a["amount"]:
+            return "refund before approval"
+    return ""
+
+
 @contextmanager
 def needs_for(case):
-    """Use this case's handoff facts while attribute_failure() runs.
+    """Use this case's handoff facts and this team's approval rule while
+    attribute_failure() and handoff_gaps() run.
 
     attribution.NEEDS lists the facts per handoff, which works while
     each agent does one job. Billing does two jobs here (a refund after
     policy, a double charge alone), and each job needs different facts.
+    attribution.money_rule checks the opening case's return rule, so
+    approval_rule takes its place.
     """
-    with attribution.use_needs(case["needs"]):
+    with attribution.use_rules(case["needs"], approval_rule):
         yield
 
 

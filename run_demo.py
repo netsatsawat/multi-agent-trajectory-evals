@@ -13,7 +13,7 @@ import attribution
 import scorers as S
 import tracing as T
 from attribution import (
-    NEEDS, attribute_failure, handoff_gaps, steps_from_spans, use_needs)
+    NEEDS, attribute_failure, handoff_gaps, steps_from_spans, use_rules)
 from passk import pass_at_k, pass_hat_k
 from routing import wrong_route
 from traps import greedy_in_order, naive_contains_all
@@ -30,11 +30,17 @@ REFS = {
         {"tool": "check_policy",
          "args": {"order_id": OID, "reason": "damaged"}}],
     A.BILLING: [
-        {"tool": "request_approval",
+        {"tool": "create_return",
          "args": {"order_id": OID, "amount": AMOUNT}},
         {"tool": "issue_refund",
          "args": {"order_id": OID, "amount": AMOUNT}}],
 }
+# How many reference calls are due in one run. Every run ends before
+# the item comes back, so billing's path must reach create_return, and
+# its issue_refund is not due yet. A refund anywhere in the run fails
+# the path: before create_return it is out of its turn, and after it,
+# it is not due yet.
+DUE = {A.POLICY: 2, A.BILLING: 1}
 
 
 def verdict(ok):
@@ -98,12 +104,13 @@ def print_steps(steps):
 
 def calls_by_agent(steps):
     """Split the tool steps into one call list per agent for the path
-    check."""
+    check. Each call keeps its step number in the run as "n", which the
+    matchers ignore."""
     out = {}
-    for st in steps:
+    for n, st in enumerate(steps, 1):
         if st["kind"] == "tool":
             out.setdefault(st["agent"], []).append(
-                {"tool": st["tool"], "args": st["args"]})
+                {"tool": st["tool"], "args": st["args"], "n": n})
     return out
 
 
@@ -112,9 +119,13 @@ def path_checks(steps):
     results = {}
     for agent, ref in REFS.items():
         calls = per_agent.get(agent, [])
-        ok, step, why = S.in_order(ref, calls, S.stub_judge)
+        ok, step, why = S.in_order(ref, calls, S.stub_judge, DUE[agent])
         tools = ", ".join(c["tool"] for c in calls)
-        detail = f"step {step}: {why}" if step else why
+        # in_order counts this agent's calls. Print the run's step instead.
+        if step and step <= len(calls):
+            detail = f"step {calls[step - 1]['n']}: {why}"
+        else:
+            detail = f"after its last call: {why}" if step else why
         line(f"{agent} path", ok, f"{detail}  [{tools}]")
         results[agent] = ok
     return results
@@ -137,7 +148,7 @@ def route_check(steps, want, router=A.ORCH):
 def handoff_checks(steps):
     """Track facts the way attribute_failure() does and print a verdict
     for each message whose (sender, receiver) pair is listed in NEEDS.
-    Then print what the stand-in judge read about approval in each of
+    Then print what the stand-in judge read about the return in each of
     those messages that is plain text."""
     known, all_ok, readings = {}, True, []
     for n, st in enumerate(steps, 1):
@@ -145,25 +156,25 @@ def handoff_checks(steps):
             known.setdefault(st["agent"], {}).update(
                 S.read_facts(st["result"]))
             continue
-        S.APPROVAL_LOG.clear()
+        S.RETURN_LOG.clear()
         sent = S.read_facts(st["facts"])
         pair = (st["agent"], st["to"])
         if pair in NEEDS:
             gaps = handoff_gaps(st, known.get(st["agent"], {}), sent)
             label = f"{st['agent']} -> {st['to']}"
-            # On a pass, print the approval the message passed on, so a
-            # brief that passes on "none" shows it.
-            need = ", ".join(f"{k}={sent[k]!r}" if k == "approval" else k
+            # On a pass, print the return condition the message passed
+            # on, so a brief that passes on "none" shows it.
+            need = ", ".join(f"{k}={sent[k]!r}" if k == "return" else k
                              for k in NEEDS[pair])
             line(label, not gaps,
                  f"step {n}: " + ("; ".join(gaps) if gaps
                                   else f"as the sender knew: {need}"))
             all_ok = all_ok and not gaps
-            readings += [(n, hit, ans) for hit, ans in S.APPROVAL_LOG]
+            readings += [(n, hit, ans) for hit, ans in S.RETURN_LOG]
         known.setdefault(st["to"], {}).update(sent)
     for n, hit, ans in readings:
-        found = repr(hit) if hit else "no approval phrase"
-        print(f"  judge (stub) on approval, step {n}: {found} -> {ans}")
+        found = repr(hit) if hit else "no return phrase"
+        print(f"  judge (stub) on return, step {n}: {found} -> {ans}")
     return all_ok
 
 
@@ -279,7 +290,7 @@ def keying_check(steps_a):
     for label, table in tables:
         print(f"  {label}")
         for name, steps in runs:
-            with use_needs(table):
+            with use_rules(table):
                 cause = attribute_failure(steps, S.read_facts)[0]
             if cause is None:
                 print(f"    {name}: cause none")
@@ -289,22 +300,22 @@ def keying_check(steps_a):
 
 
 def replay_check(steps):
-    """Put the approval sentence back into policy's answer and run the
+    """Put the return sentence back into policy's answer and run the
     case again on a fresh database. Policy's tools return what the
     trace recorded, and the orchestrator and billing run again.
 
-    If billing then asks for approval first and every check passes, its
-    refund with no approval in the failing run was a symptom of the fact
-    policy's answer left out.
+    If billing then sends a return label, pays no refund yet and every
+    check passes, its early refund in the failing run was a symptom of
+    the fact policy's answer left out.
     """
-    print("\n=== Replay: policy's answer with the approval sentence"
+    print("\n=== Replay: policy's answer with the return sentence"
           " put back ===")
     request = steps[0]["facts"]
     results = {st["tool"]: st["result"] for st in steps
                if st["kind"] == "tool" and st["agent"] == A.POLICY}
     answer = next(st["facts"] for st in steps if st["kind"] == "message"
                   and st["agent"] == A.POLICY and st["to"] == A.ORCH)
-    restored = f"{answer} {A.APPROVAL_LINE}"
+    restored = f"{answer} {A.RETURN_LINE}"
     print(f"  answer as sent:      {json.dumps(answer)}")
     print(f"  with fact restored:  {json.dumps(restored)}")
     db, spans = A.replay_from_answer(request, results, restored,
@@ -316,10 +327,11 @@ def replay_check(steps):
     calls = calls_by_agent(replayed)[A.BILLING]
     print("  billing now calls: "
           + ", ".join(c["tool"] for c in calls))
-    ok, step, why = S.in_order(REFS[A.BILLING], calls, S.stub_judge)
+    ok, step, why = S.in_order(REFS[A.BILLING], calls, S.stub_judge,
+                               DUE[A.BILLING])
     line("billing path", ok, why)
     for label, ok, detail in S.billing_rows(db, OID, AMOUNT):
-        if label == "approval before refund":
+        if label == "no refund before item is back":
             line(label, ok, detail)
     cause = attribute_failure(replayed, S.read_facts)[0]
     line("every check, all three grades", system_passes(db, replayed),
@@ -329,14 +341,20 @@ def replay_check(steps):
 
 # ---- matcher traps and pass^k (kept from the single-agent harness) ------
 
-def call(tool, amount=AMOUNT):
-    return {"tool": tool, "args": {"order_id": OID, "amount": amount}}
+# The traps use the blender order from team.py and the shape of that
+# team's approval rule (approve, then refund), as the article's section
+# on tool order does. A-1001's rule is the return, not an approval.
+TRAP_OID, TRAP_AMOUNT = "B-2002", 240
+
+
+def call(tool, amount=TRAP_AMOUNT):
+    return {"tool": tool, "args": {"order_id": TRAP_OID, "amount": amount}}
 
 
 def traps():
     print("\n=== Two matcher traps ===")
     print("Trap 1: the reference list is empty (it failed to load).")
-    print("  run: issue_refund(450)")
+    print(f"  run: issue_refund({TRAP_AMOUNT})")
     run = [call("issue_refund")]
     line("naive contains-all", naive_contains_all([], run),
          "all([]) is True")
@@ -362,7 +380,8 @@ def system_passes(db, steps):
     billing's tool check, each handoff (the route and the facts), and
     the outcome checked against the customer's intention."""
     calls = calls_by_agent(steps)
-    paths = all(S.in_order(ref, calls.get(a, []), S.stub_judge)[0]
+    paths = all(S.in_order(ref, calls.get(a, []), S.stub_judge,
+                           DUE[a])[0]
                 for a, ref in REFS.items())
     route_ok = wrong_route(steps, ROUTE) is None
     tools = all(c[1] for c in S.billing_rows(db, OID, AMOUNT))
@@ -375,14 +394,14 @@ def system_passes(db, steps):
 def repeated_runs(n=8, seed=2026, p_bad=0.25):
     print(f"\n=== pass^k over {n} repeated runs ===")
     print(f"Stand-in for a flaky policy agent: each run's answer leaves"
-          f" out the approval with probability {p_bad}"
+          f" out the return condition with probability {p_bad}"
           f" (random.Random({seed})).")
     rng = random.Random(seed)
     results = []
     for _ in range(n):
         reports = rng.random() >= p_bad      # one draw per run
         db, _, spans = A.run_system(A.REQUEST, "conv_rep",
-                                    reports_approval=reports)
+                                    reports_return=reports)
         results.append(system_passes(db, steps_from_spans(spans)))
     marks = " ".join("P" if r else "F" for r in results)
     print(f"run results (P = all three grades pass): {marks}")
@@ -394,13 +413,13 @@ def repeated_runs(n=8, seed=2026, p_bad=0.25):
 
 if __name__ == "__main__":
     steps_a, _, _ = score_run(
-        "Run A: the policy agent's answer leaves out the approval",
-        A.REQUEST, "run_a", reports_approval=False)
+        "Run A: the policy agent's answer leaves out the return condition",
+        A.REQUEST, "run_a", reports_return=False)
     keying_check(steps_a)
     replay_check(steps_a)
     score_run("Run B: the correct system", A.REQUEST, "run_b")
-    score_run("Run C (control): the brief says approval first,"
+    score_run("Run C (control): the brief says return label first,"
               " billing refunds first anyway",
-              A.REQUEST, "run_c", heeds_approval=False)
+              A.REQUEST, "run_c", heeds_return=False)
     traps()
     repeated_runs()

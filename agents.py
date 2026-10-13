@@ -2,7 +2,7 @@
 
   orchestrator   takes the customer's request, delegates it, answers
   policy-agent   tools: get_order, check_policy
-  billing-agent  tools: request_approval, issue_refund, send_email
+  billing-agent  tools: create_return, issue_refund, send_email
 
 Each agent is a scripted stand-in for a real one. It is plain Python
 that decides from the message it receives and does the same thing on
@@ -10,18 +10,22 @@ every run. Because no model runs, every score in this harness comes
 from the scoring code. The tools share one in-memory SQLite database,
 and billing's tools stamp the rows they write with a fake clock.
 
-The business rule says approval comes before any money moves.
-issue_refund does not check it, and many real tool backends do not
-check it either.
+The business rule says a refund is paid only after the item comes
+back. issue_refund does not check it, and many real tool backends do
+not check it either.
 
 The agents pass work the way several agent frameworks do by default.
 A tool result stays with the agent that called the tool. The policy
 agent answers the orchestrator in prose, and the orchestrator writes
 billing's task in its own words, from that answer alone. Only the
-policy agent's rules tool knows the approval limit. The orchestrator
-and billing act on what they are told. So billing asks for approval
-first only if policy's answer said a manager must approve the refund,
-and the orchestrator passed that on.
+policy agent's rules tool knows the return rule. The orchestrator and
+billing act on what they are told. So billing sends a return label
+and waits for the item only if policy's answer said the refund waits
+for the item, and the orchestrator passed that on.
+
+Every run ends before the item comes back, so a good run sends a
+return label and pays no refund yet. The bigger team in team.py has
+its own rule instead: a manager must approve any refund over $100.
 """
 import json
 import re
@@ -35,12 +39,12 @@ import tracing as T
 ORCH, POLICY, BILLING = "orchestrator", "policy-agent", "billing-agent"
 MODEL_NAME = "scripted-stand-in"   # names the scripted code (no model runs)
 PROVIDER_NAME = "local.scripted"   # the spec allows custom values here
-APPROVAL_LIMIT = 100               # refunds above this need approval
 
 SCHEMA = """
 CREATE TABLE orders(
   order_id TEXT PRIMARY KEY, email TEXT, amount INTEGER, status TEXT);
-CREATE TABLE approvals(order_id TEXT, amount INTEGER, ts TEXT);
+CREATE TABLE returns(
+  order_id TEXT, amount INTEGER, status TEXT, ts TEXT);
 CREATE TABLE refunds(order_id TEXT, amount INTEGER, ts TEXT);
 CREATE TABLE outbox(to_addr TEXT, body TEXT, ts TEXT);
 INSERT INTO orders VALUES('A-1001', 'kim@example.com', 450, 'delivered');
@@ -79,16 +83,20 @@ def get_order(db, clock, order_id):
 
 
 def check_policy(db, clock, order_id, reason):
-    amount = db.execute("SELECT amount FROM orders WHERE order_id = ?",
+    """The rules: a delivered item must come back before the refund."""
+    status = db.execute("SELECT status FROM orders WHERE order_id = ?",
                         (order_id,)).fetchone()[0]
     return {"refundable": reason.lower() in REFUNDABLE_REASONS,
-            "needs_approval": amount > APPROVAL_LIMIT}
+            "requires_return": status == "delivered"}
 
 
-def request_approval(db, clock, order_id, amount, note=""):
-    db.execute("INSERT INTO approvals VALUES (?, ?, ?)",
+def create_return(db, clock, order_id, amount, note=""):
+    """Open a return and send its label. amount is the refund to pay
+    once the item arrives. The warehouse marks the return received
+    later, which no run here reaches."""
+    db.execute("INSERT INTO returns VALUES (?, ?, 'label sent', ?)",
                (order_id, amount, clock.now()))
-    return {"approved": True}
+    return {"return_status": "label sent"}
 
 
 def issue_refund(db, clock, order_id, amount):
@@ -106,7 +114,7 @@ def send_email(db, clock, to, body):
 
 TOOLS_BY_AGENT = {
     POLICY: {"get_order": get_order, "check_policy": check_policy},
-    BILLING: {"request_approval": request_approval,
+    BILLING: {"create_return": create_return,
               "issue_refund": issue_refund, "send_email": send_email},
 }
 
@@ -205,19 +213,19 @@ def _find(pattern, text):
     return re.search(pattern, text).group(1)
 
 
-# The sentence policy adds to its answer when the refund needs a
-# manager's approval first.
-APPROVAL_LINE = (f"It is over ${APPROVAL_LIMIT}, so a manager must approve"
-                 " it before any money goes out.")
+# The sentence policy adds to its answer when the item must come back
+# before the refund is paid.
+RETURN_LINE = ("The refund is paid only after the item comes back, so a"
+               " return label goes out first.")
 
 
-def policy_agent(run, task, reports_approval=True):
+def policy_agent(run, task, reports_return=True):
     """Look the order up, check the rules, and answer in prose.
 
     The tool results stay with the policy agent. Its answer says
     whether the order can be refunded, what it cost and who paid. With
-    reports_approval=False it leaves out the manager's approval, which
-    its check_policy result still says is needed.
+    reports_return=False it leaves out the return condition, which its
+    check_policy result still says is needed.
     """
     order = run.tool(POLICY, "get_order", order_id=task["order_id"])
     verdict = run.tool(POLICY, "check_policy", order_id=task["order_id"],
@@ -228,8 +236,8 @@ def policy_agent(run, task, reports_approval=True):
     answer = (f"Order {oid} can be refunded. It arrived {task['reason']},"
               f" which the policy covers. It cost ${order['amount']},"
               f" paid by {order['email']}.")
-    if verdict["needs_approval"] and reports_approval:
-        answer += " " + APPROVAL_LINE
+    if verdict["requires_return"] and reports_return:
+        answer += " " + RETURN_LINE
     return answer
 
 
@@ -242,52 +250,61 @@ def write_brief(answer):
     amount, reason = _find(DOLLARS, answer), _find(r"arrived (\w+)", answer)
     brief = (f"Refund order {oid}: ${amount} to {email}. It arrived"
              f" {reason} and policy says it can be refunded.")
-    if "approve" in answer.lower():
-        limit = _find(r"over \$(\d+)", answer)
-        brief += (f" It is over ${limit}, so get a manager's approval"
-                  " first, then refund.")
+    if "comes back" in answer.lower():
+        brief += (" Send a return label first, and refund only once"
+                  " the item is back.")
     return brief
 
 
-def make_billing_agent(heeds_approval=True):
+def make_billing_agent(heeds_return=True):
     """Billing reads its brief with its own rule: if the brief says to
-    get approval first, it asks for approval, then refunds. With
-    heeds_approval=False (the control run) it refunds first anyway and
-    files the approval after. A brief that says nothing about approval
-    gets a refund only."""
+    send a return label first, it opens the return, emails the label
+    and pays nothing yet. With heeds_return=False (the control run) it
+    refunds first anyway and sends the label after. A brief that says
+    nothing about a return gets a refund only."""
     def billing_agent(run, brief):
         oid, email = _find(ORDER_ID, brief), _find(EMAIL, brief)
         amount = int(_find(DOLLARS, brief))
-        first = "approval first" in brief.lower()
+        wait = "return label first" in brief.lower()
 
-        def approve():
-            run.tool(BILLING, "request_approval", order_id=oid,
-                     amount=amount, note="approval needed per policy")
+        def open_return():
+            run.tool(BILLING, "create_return", order_id=oid,
+                     amount=amount, note="refund once the item is back")
 
-        def refund():
-            run.tool(BILLING, "issue_refund", order_id=oid, amount=amount)
-
-        if first and heeds_approval:
-            approve()
-            refund()
-        elif first:
-            refund()
-            approve()
-        else:
-            refund()
-        run.tool(BILLING, "send_email", to=email,
-                 body=f"Refund of ${amount} issued for {oid}.")
+        if wait and heeds_return:
+            open_return()
+            run.tool(BILLING, "send_email", to=email,
+                     body=f"Return label for {oid} attached. We refund"
+                          f" ${amount} once the item arrives.")
+            return {"order_id": oid, "label_sent": True,
+                    "refund_due": amount}
+        run.tool(BILLING, "issue_refund", order_id=oid, amount=amount)
+        body = f"Refund of ${amount} issued for {oid}."
+        if wait:
+            open_return()
+            body += " Return label attached."
+        run.tool(BILLING, "send_email", to=email, body=body)
         return {"order_id": oid, "refunded": amount}
     return billing_agent
 
 
-def run_system(customer_request, conversation_id, reports_approval=True,
-               heeds_approval=True, recorded=None):
+def reply_to_customer(done):
+    """The orchestrator's reply, from billing's report."""
+    if "refunded" in done:
+        return (f"Your refund of ${done['refunded']} for order"
+                f" {done['order_id']} has been issued.")
+    return (f"We sent a return label for order {done['order_id']}. We"
+            f" will pay your ${done['refund_due']} refund once the item"
+            " arrives.")
+
+
+def run_system(customer_request, conversation_id, reports_return=True,
+               heeds_return=True, recorded=None):
     """Run the orchestrator end to end. Returns (db, answer, spans).
 
-    reports_approval: whether the policy agent's answer says a manager
-    must approve the refund first. In the failing run it does not.
-    heeds_approval: whether billing follows a brief that says so. In the
+    reports_return: whether the policy agent's answer says the refund
+    waits for the item. In the failing run it does not.
+    heeds_return: whether billing follows a brief that says so. In the
     control run it does not. recorded: (results, answer) to replay the
     policy agent with. Its tools return the recorded results, keyed by
     tool name, and it sends `answer` in place of its own.
@@ -298,10 +315,10 @@ def run_system(customer_request, conversation_id, reports_approval=True,
             name: (lambda db, clock, _r=r, **args: _r)
             for name, r in recorded[0].items()}}
     run = Run(conversation_id, tools=tools)
-    billing = make_billing_agent(heeds_approval)
+    billing = make_billing_agent(heeds_return)
 
     def policy(task):
-        said = policy_agent(run, task, reports_approval)
+        said = policy_agent(run, task, reports_return)
         return said if recorded is None else recorded[1]
 
     def orchestrator(req):
@@ -314,8 +331,7 @@ def run_system(customer_request, conversation_id, reports_approval=True,
         run.chat("tool_call")              # decides to hand off to billing
         done = run.invoke(BILLING, ORCH, write_brief(answer),
                           lambda t: billing(run, t))
-        return {"answer": f"Your refund of ${done['refunded']} for order "
-                          f"{done['order_id']} has been issued."}
+        return {"answer": reply_to_customer(done)}
 
     reply = run.invoke(ORCH, "customer", customer_request, orchestrator)
     run.db.commit()

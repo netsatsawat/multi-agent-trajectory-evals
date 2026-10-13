@@ -6,15 +6,15 @@ excerpt 5: 17 lines, longest 63 chars, 0 blank lines -> OK
 excerpt 1 defines: AGENT, ARGS, OP, RESULT, TOOL, json, steps_from_spans
 excerpt 1  steps_from_spans(failing run) -> [('customer', 'msg->orchestrator'), ('orchestrator', 'msg->policy-agent'), ('policy-agent', 'get_order'), ('policy-agent', 'check_policy'), ('policy-agent', 'msg->orchestrator'), ('orchestrator', 'msg->billing-agent'), ('billing-agent', 'issue_refund'), ('billing-agent', 'send_email'), ('billing-agent', 'msg->orchestrator'), ('orchestrator', 'msg->customer')]
 excerpt 2 defines: NEEDS, REFUND_FACTS, handoff_gaps
-excerpt 2  handoff_gaps(policy's answer, step 5) -> ["approval: knew 'before refund', sent 'none'"]
+excerpt 2  handoff_gaps(policy's answer, step 5) -> ["return: knew 'before refund', sent 'none'"]
 excerpt 2  handoff_gaps(orchestrator's brief, step 6) -> []
 excerpt 2  handoff_gaps(correct run, steps 5 and 6) -> [[], []]
 excerpt 3 defines: attribute_failure, money_rule
-excerpt 3  attribute_failure(failing run) -> cause (5, 'policy-agent', 'handoff to orchestrator', ["approval: knew 'before refund', sent 'none'"])
-                                             symptom (7, 'billing-agent', 'issue_refund', ['refund before approval'])
+excerpt 3  attribute_failure(failing run) -> cause (5, 'policy-agent', 'handoff to orchestrator', ["return: knew 'before refund', sent 'none'"])
+                                             symptom (7, 'billing-agent', 'issue_refund', ['refund before the item came back'])
 excerpt 3  read() calls on the failing run: 10, one per step
 excerpt 3  attribute_failure(correct run) -> (None, None)
-excerpt 3  attribute_failure(control: billing refunds first anyway) -> ((7, 'billing-agent', 'issue_refund', ['refund before approval']), (7, 'billing-agent', 'issue_refund', ['refund before approval']))
+excerpt 3  attribute_failure(control: billing refunds first anyway) -> ((7, 'billing-agent', 'issue_refund', ['refund before the item came back']), (7, 'billing-agent', 'issue_refund', ['refund before the item came back']))
 excerpts match the harness: OK
 excerpt 4 defines: AFTER, ONCE, order_gaps
 excerpt 4  order_gaps(as designed) -> []

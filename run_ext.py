@@ -165,6 +165,9 @@ def tool_order():
         db, answer, spans = TM.run_case(CASE, "conv_order", plans=plans)
         steps = steps_from_spans(spans)
         exact, in_ord, gaps, eff, out = score_order_run(steps, db, answer)
+        with TM.needs_for(CASE):           # this team's facts and rule
+            n, facts, hgaps = billing_handoff(steps)
+            cause = attribute_failure(steps, S.read_facts)[0]
         print(f"\n-- {title} --")
         for agent in (POLICY, BILLING):
             calls = [c["tool"] for c in calls_by_agent(steps)[agent]]
@@ -180,13 +183,11 @@ def tool_order():
                        for n, _, what, r in gaps) or "every edge holds")
         for label, ok, detail in eff:
             line(label, ok, detail)
-        n, facts, hgaps = billing_handoff(steps)
         line("handoff facts to billing", not hgaps,
              f"step {n}: " + ("; ".join(hgaps) if hgaps else
                               f"needs_approval={facts['needs_approval']}"
                               " passed on as policy reported it"))
         line("reply names order and amount", out[0], out[1])
-        cause = attribute_failure(steps, S.read_facts)[0]
         root = first_wrong(cause, *gaps)
         print(f"  cause from the handoff and money rules: {who(cause)}")
         print(f"  cause with the order check added: {who(root)}")
