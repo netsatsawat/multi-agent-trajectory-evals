@@ -72,7 +72,7 @@ only dependency is the OpenTelemetry SDK, pinned to 1.45.0.
   check keyed three ways, and the replay. Run B is the correct system, where billing sends a
   return label and waits for the item, and run C is a control where billing ignores the return
   condition it was told about. Each run gets its span tree, its numbered steps, every check and
-  the cause. Two matcher traps and pass^k over eight runs close the output. It also saves the
+  the cause. Two matcher traps and passᵏ over eight runs close the output. It also saves the
   spans of runs A, B and C to `traces/`.
 - `run_ext.py` prints the cases for a bigger four-agent team: one refund in seven tool orders,
   a test of the order checkers on all 120 orders of billing's tools, a request sent to the wrong
@@ -93,11 +93,11 @@ Each grade breaks into one to three measures, and each measure has its own small
 | Measure | Code that scores it | What to report | Its case |
 |---|---|---|---|
 | 1a. Right tools and arguments | `in_order`, with a rule per argument | Path pass rate per agent | The opening refund (A-1001) |
-| 1b. Right order | `order_gaps` and a dependency graph | Pass rate, pass^k and the first broken edge | A blender refund (B-2002) |
+| 1b. Right order | `order_gaps` and a dependency graph | Pass rate, passᵏ and the first broken edge | A blender refund (B-2002) |
 | 1c. Right effects | `billing_rows`, `tool_effects` | Pass rate per check | A-1001 and B-2002 |
 | 2a. Right agent (routing) | `wrong_route` | On sampled cases: accuracy with an interval, routes taken per intention, what each wrong route did | A damaged parcel (C-3003), 12 requests |
 | 2b. Right payload | `handoff_gaps`, with `read_facts` for text | Pass rate per handoff | A-1001 |
-| 3. The outcome against the intention | `final_answer_check`, or a judge | Pass rate and pass^k | C-3003 |
+| 3. The outcome against the intention | `final_answer_check`, or a judge | Pass rate and passᵏ | C-3003 |
 | Failure attribution | `attribute_failure`, `first_wrong` | The cause and symptom of each failing run, confirmed by a person | A-1001, B-2002, C-3003 |
 
 ## Grade 1: each agent's path
@@ -417,7 +417,7 @@ can fail CI.
    a matcher, every order of one agent's tools for a graph (`checker_test` in `run_ext.py`), and
    runs you labelled yourself before a model judge replaces `stub_judge` or the phrase table in
    `read_facts`.
-6. Score all three grades and run each case several times. Report pass^k next to the pass rate.
+6. Score all three grades and run each case several times. Report passᵏ next to the pass rate.
 7. Find the earliest wrong step with `first_wrong`. When it is a handoff, replay from that
    message with the missing fact put back, make the tools before it return what the trace
    recorded, and rerun the agents after it. `replay_check` in `run_demo.py` only works for the
@@ -463,7 +463,7 @@ method named the right agent only 53.5% of the time.
 ## Further reading
 
 - [OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai/tree/main/docs/gen-ai), and the [open issue on multi-agent traces](https://github.com/open-telemetry/semantic-conventions-genai/issues/243)
-- [tau-bench](https://arxiv.org/abs/2406.12045), the source of pass^k
+- [tau-bench](https://arxiv.org/abs/2406.12045), the source of passᵏ
 - [ToolSandbox](https://arxiv.org/abs/2408.04682), which writes a task's steps as a graph of order dependencies, much like `AFTER`
 - [Who&When](https://arxiv.org/abs/2505.00212), on naming the agent and step behind a multi-agent failure
 - [MAST](https://arxiv.org/abs/2503.13657), a study of why multi-agent systems fail
