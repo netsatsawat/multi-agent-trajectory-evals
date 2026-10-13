@@ -1,4 +1,4 @@
-REFUND_FACTS = ["order_id", "amount", "email", "approval"]
+REFUND_FACTS = ["order_id", "amount", "email", "return"]
 NEEDS = {  # (sender, receiver): the facts the receiver needs
     ("orchestrator", "policy-agent"): ["order_id", "reason"],
     ("policy-agent", "orchestrator"): REFUND_FACTS,

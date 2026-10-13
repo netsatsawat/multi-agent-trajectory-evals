@@ -40,7 +40,7 @@ def steps_from_spans(spans):
 
 
 # >>> excerpt 2
-REFUND_FACTS = ["order_id", "amount", "email", "approval"]
+REFUND_FACTS = ["order_id", "amount", "email", "return"]
 NEEDS = {  # (sender, receiver): the facts the receiver needs
     ("orchestrator", "policy-agent"): ["order_id", "reason"],
     ("policy-agent", "orchestrator"): REFUND_FACTS,
@@ -64,20 +64,20 @@ def handoff_gaps(step, known, sent):
 
 
 # >>> excerpt 3
-def money_rule(step, approved):
-    """Approval before money moves. Returns a reason or ''."""
-    a = step["args"]
-    if step["tool"] == "request_approval":
-        approved[a["order_id"]] = a["amount"]
+def money_rule(step, returns):
+    """No refund before the item is back. A reason or ''."""
+    a, r = step["args"], step["result"]
+    if "return_status" in r:
+        returns[a["order_id"]] = r["return_status"]
     if step["tool"] == "issue_refund":
-        if approved.get(a["order_id"], 0) < a["amount"]:
-            return "refund before approval"
+        if returns.get(a["order_id"]) != "received":
+            return "refund before the item came back"
     return ""
 def attribute_failure(steps, read):
     """First wrong step (the cause) and first broken rule
     (the symptom), each as (step, agent, what, reasons).
     read() pulls the facts out of a message or tool result."""
-    known, approved = {}, {}
+    known, returns = {}, {}
     cause = symptom = None
     for n, st in enumerate(steps, 1):
         who = st["agent"]
@@ -89,7 +89,7 @@ def attribute_failure(steps, read):
             wrong = (n, who, what, gaps) if gaps else None
         else:
             known.setdefault(who, {}).update(read(st["result"]))
-            why = money_rule(st, approved)
+            why = money_rule(st, returns)
             wrong = (n, who, st["tool"], [why]) if why else None
             symptom = symptom or wrong
         cause = cause or wrong
@@ -110,18 +110,22 @@ def first_wrong(*found):
 
 
 @contextmanager
-def use_needs(table):
-    """Use another NEEDS table while the code inside the block runs.
+def use_rules(needs, money=None):
+    """Use another NEEDS table, and another money rule if one is given,
+    while the code inside the block runs.
 
-    handoff_gaps reads the module-level NEEDS, so swapping it keeps the
-    article's excerpt 2 unchanged. team.needs_for uses this when one
-    agent does two jobs, and run_demo.py uses it to show what a table
-    keyed by receiver alone would name as the cause.
+    handoff_gaps reads the module-level NEEDS, and attribute_failure
+    the module-level money_rule, so swapping them keeps the article's
+    excerpts 2 and 3 unchanged. team.needs_for uses this for the
+    blender team, which has its own approval rule and lists different
+    facts when one agent does two jobs. run_demo.py swaps NEEDS alone
+    to show what a table keyed by receiver alone would name as the
+    cause.
     """
-    global NEEDS
-    saved = NEEDS
-    NEEDS = table
+    global NEEDS, money_rule
+    saved = NEEDS, money_rule
+    NEEDS, money_rule = needs, money or money_rule
     try:
         yield
     finally:
-        NEEDS = saved
+        NEEDS, money_rule = saved

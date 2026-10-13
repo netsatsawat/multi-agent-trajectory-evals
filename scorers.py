@@ -16,6 +16,8 @@ import re
 COMPARE, IGNORE, JUDGE = "compare", "ignore", "judge"
 ARG_POLICY = {
     "check_policy": {"order_id": COMPARE, "reason": JUDGE},
+    "create_return": {
+        "order_id": COMPARE, "amount": COMPARE, "note": IGNORE},
     "request_approval": {
         "order_id": COMPARE, "amount": COMPARE, "note": IGNORE},
     "send_email": {"to": COMPARE, "body": IGNORE},
@@ -59,55 +61,63 @@ def stub_judge(name, want, got):
 # ---- reading the facts in a message ---------------------------------------
 # A message between agents can be a dict or plain text. read_facts turns
 # either into a dict of facts, so the payload check can compare them.
-# Code reads the order ID, the amount and the email. For the approval
+# Code reads the order ID, the amount and the email. For the return
 # rule, a real setup asks a model judge one closed question: what does
-# this message say about manager approval? The answers are "before
-# refund", "already given", "side task" and "none". This stand-in
-# answers from a fixed phrase table, so the run repeats exactly. Like
-# SAME_MEANING, the table only knows the scripted messages in agents.py.
+# this message say about getting the item back before the refund? The
+# answers are "before refund", "already back", "side task" and "none".
+# This stand-in answers from a fixed phrase table, so the run repeats
+# exactly. Like SAME_MEANING, the table only knows the scripted
+# messages in agents.py. The agents never call it: the orchestrator
+# and billing read their messages with their own keyword rules.
 FACT_PATTERNS = {"order_id": r"\b([A-Z]-\d{4})\b", "amount": r"\$(\d+)",
                  "email": r"([\w.]+@[\w.]+\w)"}
-APPROVAL_SAYS = [  # (answer, phrases). The first phrase found wins.
-    ("before refund", ["approve it before", "approval first"]),
-    ("already given", ["already approved"]),
-    ("side task", ["also file"]),
+RETURN_SAYS = [  # (answer, phrases). The first phrase found wins.
+    ("before refund", ["after the item comes back",
+                       "once the item is back"]),
+    ("already back", ["item is already back"]),
+    ("side task", ["also send a return label"]),
 ]
-NO_APPROVAL = "none"
-APPROVAL_LOG = []   # (phrase found or None, answer), one per text read
+NO_RETURN = "none"
+RETURN_LOG = []   # (phrase found or None, answer), one per text read
 
 
-def read_approval(text):
-    """Answer the closed question about approval for one message."""
+def read_return(text):
+    """Answer the closed question about the return for one message."""
     low = text.lower()
-    for answer, phrases in APPROVAL_SAYS:
+    for answer, phrases in RETURN_SAYS:
         hit = next((p for p in phrases if p in low), None)
         if hit:
-            APPROVAL_LOG.append((hit, answer))
+            RETURN_LOG.append((hit, answer))
             return answer
-    APPROVAL_LOG.append((None, NO_APPROVAL))
-    return NO_APPROVAL
+    RETURN_LOG.append((None, NO_RETURN))
+    return NO_RETURN
 
 
 def read_facts(content):
     """The facts in a message or a tool result, as a dict.
 
-    A dict is read as it is, and needs_approval becomes the fact
-    approval: "before refund" when true, because the business rule puts
-    approval before any money moves, and "none" when false. Text is read
-    with FACT_PATTERNS and the approval phrase table.
+    A dict is read as it is. requires_return becomes the fact return:
+    "before refund" when true, because the rule pays the refund only
+    after the item comes back, and "none" when false. For the blender
+    team in team.py, needs_approval becomes the fact approval in the
+    same way. Text is read with FACT_PATTERNS and the return phrase
+    table.
     """
     if isinstance(content, dict):
         facts = dict(content)
+        if "requires_return" in facts:
+            facts["return"] = ("before refund" if facts["requires_return"]
+                               else NO_RETURN)
         if "needs_approval" in facts:
             facts["approval"] = ("before refund" if facts["needs_approval"]
-                                 else NO_APPROVAL)
+                                 else "none")
         return facts
     facts = {}
     for key, pattern in FACT_PATTERNS.items():
         m = re.search(pattern, content)
         if m:
             facts[key] = int(m.group(1)) if key == "amount" else m.group(1)
-    facts["approval"] = read_approval(content)
+    facts["return"] = read_return(content)
     return facts
 
 
@@ -134,19 +144,24 @@ def exact_match(reference, actual, judge):
     return True, f"all {len(reference)} steps identical"
 
 
-def in_order(reference, actual, judge, prefix=False):
+def in_order(reference, actual, judge, due=None):
     """Check that the reference calls appear in order.
 
     An extra call in between passes only if its tool is not in the
     reference, so a refund made too early fails instead of being
-    skipped as noise. With prefix=True, a run that stops before the
-    end of the reference still passes. Returns (passed, step, why).
+    skipped as noise. due is how many reference calls are due in this
+    run, all of them by default. With due=1, the run must stop after
+    the first reference call. A later reference call fails as not due
+    yet, as a refund does while every run ends before the item comes
+    back. Returns (passed, step, why).
     """
     if not reference:
         return False, 0, "empty reference: nothing to check"
     ref_tools = {c["tool"] for c in reference}
     i = 0
     for step, call in enumerate(actual, 1):
+        if due is not None and i >= due and call["tool"] in ref_tools:
+            return False, step, f"got {call['tool']}, not due yet"
         if i < len(reference):
             why = mismatch(reference[i], call, judge)
             if not why:
@@ -159,10 +174,12 @@ def in_order(reference, actual, judge, prefix=False):
             want = (reference[i]["tool"]
                     if i < len(reference) else "no more calls")
             return False, step, f"got {got}, want {want}"
-    if i < len(reference) and not prefix:
+    if i < (len(reference) if due is None else due):
         missing = reference[i]["tool"]
         return False, len(actual) + 1, f"missing {missing}"
-    return True, None, f"{i} of {len(reference)} in order"
+    later = len(reference) - i
+    return True, None, (f"{i} of {len(reference)} in order"
+                        + (f", {later} not due yet" if later else ""))
 
 
 def any_order(reference, actual, judge):
@@ -200,31 +217,34 @@ def precision_recall(reference, actual, judge):
 
 
 def billing_rows(db, order_id, amount):
-    """Check the rows billing's tools wrote to SQLite, and their order.
+    """Check the rows billing's tools wrote to SQLite.
 
     This is part of the tool check on billing's path, so it is specific
-    to this refund system. It never reads what the agents said.
+    to this refund system. It never reads what the agents said. Every
+    run ends before the item comes back, so a good run leaves one
+    return row with its label sent, no refund row, and an email with
+    the label. No return here is ever received, so a refund row alone
+    breaks the rule and no timestamp is needed. A run that went on past
+    the item's arrival would need the time the return was received and
+    the time of the refund.
     """
     q = lambda sql: db.execute(sql, (order_id,)).fetchall()
-    refunds = q("SELECT amount, ts FROM refunds WHERE order_id = ?")
-    approvals = q("SELECT amount, ts FROM approvals WHERE order_id = ?")
-    status = q("SELECT status FROM orders WHERE order_id = ?")[0][0]
-    checks = []
-    checks.append((f"one refund row of {amount}",
-                   [r[0] for r in refunds] == [amount],
-                   f"refunds={[r[0] for r in refunds]}"))
-    checks.append((f"one approval row of {amount}",
-                   [a[0] for a in approvals] == [amount],
-                   f"approvals={[a[0] for a in approvals]}"))
-    if refunds and approvals:
-        a_ts, r_ts = approvals[0][1], refunds[0][1]
-        checks.append(("approval before refund", a_ts < r_ts,
-                       f"approval {a_ts}, refund {r_ts}"))
-    else:
-        checks.append(("approval before refund", False, "row missing"))
-    checks.append(("order status is refunded", status == "refunded",
-                   f"status={status}"))
-    return checks
+    returns = q("SELECT amount, status FROM returns WHERE order_id = ?")
+    refunds = [r[0] for r in
+               q("SELECT amount FROM refunds WHERE order_id = ?")]
+    mail = [m[0] for m in q("SELECT body FROM outbox WHERE to_addr ="
+                            " (SELECT email FROM orders"
+                            " WHERE order_id = ?)")]
+    back = any(status == "received" for _, status in returns)
+    return [
+        (f"return row: {amount}, label sent",
+         returns == [(amount, "label sent")], f"returns={returns}"),
+        ("no refund before item is back", back or not refunds,
+         f"refunds={refunds}, item {'back' if back else 'not back'}"),
+        ("return label emailed",
+         any("return label" in m.lower() for m in mail),
+         f"outbox={mail}"),
+    ]
 
 
 def final_answer_check(text, must_include):
@@ -234,8 +254,8 @@ def final_answer_check(text, must_include):
     of $450 for order A-1001. The outcome is what the system produces,
     and this check reads one part of it, the reply. The reply passes
     when it names every item in must_include, here the order ID and the
-    refund amount. billing_rows checks the refund row itself, as part
-    of billing's tool check.
+    refund amount. billing_rows checks the return and refund rows
+    themselves, as part of billing's tool check.
     """
     missing = [m for m in must_include if m not in text]
     return not missing, (f"missing {missing}" if missing

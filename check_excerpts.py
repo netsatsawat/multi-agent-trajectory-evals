@@ -16,6 +16,7 @@ from pathlib import Path
 import agents as A
 import attribution
 import routing
+import run_demo as R
 import scorers as S
 import sequence
 import team as TM
@@ -60,9 +61,9 @@ def main():
         Path(f"excerpts/excerpt_{n}.py").write_text(code + "\n")
 
     # Record real OpenTelemetry spans from three runs of the agents.
-    _, _, bad = A.run_system(A.REQUEST, "x1", reports_approval=False)
+    _, _, bad = A.run_system(A.REQUEST, "x1", reports_return=False)
     _, _, good = A.run_system(A.REQUEST, "x2")
-    _, _, ctrl = A.run_system(A.REQUEST, "x3", heeds_approval=False)
+    _, _, ctrl = A.run_system(A.REQUEST, "x3", heeds_return=False)
 
     ns = {}
     # Excerpt 1 runs alone. It rebuilds the steps in time order and
@@ -100,7 +101,7 @@ def main():
 
     gaps = gaps_at(steps, 4)
     print(f"excerpt 2  handoff_gaps(policy's answer, step 5) -> {gaps}")
-    assert gaps == ["approval: knew 'before refund', sent 'none'"]
+    assert gaps == ["return: knew 'before refund', sent 'none'"]
     gaps = gaps_at(steps, 5)
     print(f"excerpt 2  handoff_gaps(orchestrator's brief, step 6) -> {gaps}")
     assert gaps == []
@@ -122,9 +123,9 @@ def main():
     print(f"excerpt 3  attribute_failure(failing run) -> cause {cause}")
     print(f"{'symptom':>52} {symptom}")
     assert cause == (5, A.POLICY, "handoff to " + A.ORCH,
-                     ["approval: knew 'before refund', sent 'none'"])
+                     ["return: knew 'before refund', sent 'none'"])
     assert symptom == (7, A.BILLING, "issue_refund",
-                       ["refund before approval"])
+                       ["refund before the item came back"])
     print(f"excerpt 3  read() calls on the failing run: {len(reads)},"
           f" one per step")
     assert len(reads) == len(steps)
@@ -135,6 +136,30 @@ def main():
     print("excerpt 3  attribute_failure(control: billing refunds first"
           f" anyway) -> {r}")
     assert r[0] == r[1] and r[0][:2] == (7, A.BILLING)
+    # No run reaches a received return, so check that path here: once a
+    # tool result says the return is received, the refund passes.
+    back = {}
+    ns["money_rule"]({"tool": "mark_received",
+                      "args": {"order_id": A.ORDER},
+                      "result": {"return_status": "received"}}, back)
+    assert ns["money_rule"]({"tool": "issue_refund",
+                             "args": {"order_id": A.ORDER,
+                                      "amount": 450},
+                             "result": {"refunded": 450}}, back) == ""
+    # Billing opens the return, then refunds anyway in the same run. The
+    # money rule and billing's path check in run_demo.py both fail it.
+    early = [{"tool": "create_return",
+              "args": {"order_id": A.ORDER, "amount": 450},
+              "result": {"return_status": "label sent"}},
+             {"tool": "issue_refund",
+              "args": {"order_id": A.ORDER, "amount": 450},
+              "result": {"refunded": 450}}]
+    sent = {}
+    assert [ns["money_rule"](st, sent) for st in early] == [
+        "", "refund before the item came back"]
+    assert S.in_order(R.REFS[A.BILLING], early, S.stub_judge,
+                      R.DUE[A.BILLING]) == (
+        False, 2, "got issue_refund, not due yet")
 
     # The excerpts must agree with attribution.py, which the demo imports.
     for spans in (bad, good, ctrl):

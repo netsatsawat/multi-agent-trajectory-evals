@@ -3,7 +3,7 @@
 [![reproduce](https://github.com/netsatsawat/multi-agent-trajectory-evals/actions/workflows/ci.yml/badge.svg)](https://github.com/netsatsawat/multi-agent-trajectory-evals/actions/workflows/ci.yml)
 
 If you have built a multi-agent system, you may have a test that reads only the final reply.
-That test can pass a run where the money went out before anyone approved it. This repo grades
+That test can pass a run where the money went out before the item came back. This repo grades
 each run on three things, then names the agent that caused the failure:
 
 1. Each agent's path: the right tools with the right arguments, in an order that works, with
@@ -13,15 +13,34 @@ each run on three things, then names the agent that caused the failure:
 3. The outcome, checked against the customer's intention. The intention is what the customer
    wants, and the outcome is what the agentic AI system produces.
 
-![The opening refund scored on every check. In the failing run, billing's path, billing's approval rows and the policy agent's answer to the orchestrator fail, the reply passes, and the cause is the policy agent at step 5](assets/scored-run.png)
+![The opening refund scored on every check, with each step numbered. In the failing run, the policy agent's answer at step 5 fails, billing's path fails at its refund at step 7, and so do billing's return and refund rows. The reply at step 10 passes, and the cause is the policy agent at step 5. The correct run passes every check](assets/scored-run.png)
 
-In the opening case, a customer asks for a $450 refund on order A-1001. The policy agent's
-rules tool says a manager must approve it, but the policy agent answers the orchestrator in
-plain text and leaves the approval out. So the orchestrator passes on only what it was told, and
-billing refunds without asking for approval. The reply is still right. Billing made the visible
-mistake, but the policy agent caused it. If the payload check never reads the answers agents
-send back, failure attribution names billing, and you fix billing while the policy agent keeps
-leaving the approval out.
+In the opening case, a customer asks for a $450 refund on order A-1001, which arrived broken.
+The rules say a refund is paid only after the item comes back. Here is the failing run, run A,
+step by step. The rest of this README uses these step numbers.
+
+1. The customer writes to the orchestrator: "My order A-1001 arrived broken. I need a refund."
+2. The orchestrator sends the order ID and the reason, broken, to the policy agent.
+3. The policy agent calls `get_order`, which returns the amount, $450, and the email,
+   kim@example.com.
+4. The policy agent calls `check_policy`, which returns `refundable: true` and
+   `requires_return: true`.
+5. The policy agent answers the orchestrator in plain text: "Order A-1001 can be refunded. It
+   arrived broken, which the policy covers. It cost $450, paid by kim@example.com." The answer
+   leaves out that the item must come back first.
+6. The orchestrator tells billing: "Refund order A-1001: $450 to kim@example.com. It arrived
+   broken and policy says it can be refunded." It passes on only what the policy agent said.
+7. Billing calls `issue_refund` and pays the $450 before the item comes back.
+8. Billing calls `send_email` and tells the customer the refund went out.
+9. Billing reports back to the orchestrator that it refunded $450.
+10. The orchestrator replies to the customer: "Your refund of $450 for order A-1001 has been
+    issued."
+
+The reply at step 10 is right, so a test on the reply passes. Billing made the visible mistake
+at step 7, but the policy agent caused it at step 5. The return condition stayed in the policy
+agent's tool result at step 4, and a tool result stays with the agent that called the tool. If
+the payload check never reads the answers agents send back, failure attribution names billing,
+and you fix billing while the policy agent keeps leaving the return condition out.
 
 The agents are scripted Python stand-ins and every case is made up, so it all runs offline with
 no model and no API key. The checks read OpenTelemetry spans, so they also work on your own
@@ -40,12 +59,13 @@ uv venv --python 3.12 && uv pip install -r requirements.txt
 Without uv, run `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`. The
 only dependency is the OpenTelemetry SDK, pinned to 1.45.0.
 
-- `run_demo.py` prints the opening refund. Run A, where the policy agent's answer leaves out the
-  approval, comes first, then a rescore of runs A and B with the payload check keyed three ways,
-  and the replay. Run B is the correct system, and run C is a control where billing ignores the
-  approval it was told about. Each run gets its span tree, its steps, every check and the cause.
-  Two matcher traps and pass^k over eight runs close the output. It also saves the spans of runs
-  A, B and C to `traces/`.
+- `run_demo.py` prints the opening refund. Run A, where the policy agent's answer at step 5
+  leaves out the return condition, comes first, then a rescore of runs A and B with the payload
+  check keyed three ways, and the replay. Run B is the correct system, where billing sends a
+  return label and waits for the item, and run C is a control where billing ignores the return
+  condition it was told about. Each run gets its span tree, its numbered steps, every check and
+  the cause. Two matcher traps and pass^k over eight runs close the output. It also saves the
+  spans of runs A, B and C to `traces/`.
 - `run_ext.py` prints the cases for a bigger four-agent team: one refund in seven tool orders,
   a test of the order checkers on all 120 orders of billing's tools, a request sent to the wrong
   agent, every route forced on one case per intention, 12 requests through a keyword router, and
@@ -76,22 +96,27 @@ Each grade breaks into one to three measures, and each measure has its own small
 
 Let's start with the trajectory, the path the agents took. `steps_from_spans` (excerpt 1)
 rebuilds it as numbered steps in time order. A step is one tool call or one message, including
-the customer's request and the final reply.
+the customer's request and the final reply, steps 1 and 10 of run A.
 
 ### 1a. Right tools and arguments
 
 `in_order` in `scorers.py` compares each agent's calls, in order, with a short reference list
 (`REFS` in `run_demo.py`). The list holds only the calls the rules need, so an extra call such as
-billing's `send_email` can come anywhere. Each argument gets a rule. IDs and amounts must match
-exactly, because a wrong amount moves real money. Billing's free-text `note` is ignored. A
-free-text reason goes to a judge, here `stub_judge`, a synonym table that treats "broken" as
-"damaged" so the demo needs no model. In run A, billing's path fails at its first call, where it
-got `issue_refund` and wanted `request_approval`.
+billing's `send_email` can come anywhere. The policy agent's list is `get_order`, then
+`check_policy`, steps 3 and 4 of run A. Billing's list is `create_return`, then `issue_refund`,
+because the refund waits for the item. Every run here ends before the item comes back, so only
+`create_return` is due (`DUE` in `run_demo.py`), and an `issue_refund` anywhere in the run fails
+billing's path. Each argument gets a rule. IDs and amounts must match exactly, because a wrong
+amount moves real money. Billing's free-text `note` is ignored. A free-text reason goes to a
+judge, here `stub_judge`, a synonym table that treats "broken" as "damaged" so the demo needs no
+model. With it, the policy agent's `check_policy` call at step 4 passes. In run A, billing's
+path fails at its first call, `issue_refund` at step 7, where it wanted `create_return`.
 
 Test a matcher before you trust it. `traps.py` holds two common matchers, naive contains-all and
-greedy in-order. Both pass an empty reference list, which you get when a reference fails to load,
-and both pass a run that refunds, asks for approval, then refunds again. The fixed matcher,
-`in_order`, fails both runs.
+greedy in-order. The trap runs borrow the blender refund from 1b below, which has its own
+approval rule. Both matchers pass an empty reference list, which you get when a reference fails
+to load, and both pass a run that refunds, asks for approval, then refunds again. The fixed
+matcher, `in_order`, fails both runs.
 
 ### 1b. Right order
 
@@ -100,10 +125,10 @@ first. A reference list fixes one order, so it also fails orders that do no harm
 graph only says which call must come before which, and no edge means any order. We add an edge
 only where a call reads another call's result or a rule says so.
 
-The case is a made-up blender refund on the bigger team in `team.py`: "My blender B-2002 is
-broken. I need a refund." The order cost $240. Here billing has five tools, and `check_policy`
-takes the amount from `get_order`'s result, so the graph covers seven tools across policy and
-billing:
+The case is a made-up blender refund on the bigger team in `team.py`, which has its own rule: a
+manager must approve any refund over $100. The customer writes: "My blender B-2002 is broken. I
+need a refund." The order cost $240. Here billing has five tools, and `check_policy` takes the
+amount from `get_order`'s result, so the graph covers seven tools across policy and billing:
 
 ```python
 AFTER = {  # tool: the tools that must succeed before it runs
@@ -143,7 +168,8 @@ succeeded, and the "one case note" check in `tool_effects` counts the notes.
 Exact match and the in-order list fail the run that logs the case note first, which does no
 harm. The graph passes it and fails every run that changed what the system did. The reply check
 passes four of the five harmful runs. In the last run, billing followed its handoff, and the
-mistake was policy's, at step 3.
+mistake was policy's `check_policy` call at step 3. In `run_ext.py`'s output, the exact-match
+and in-order lines count each agent's own calls. Every other line counts steps in the run.
 
 ![Six of the orders scored by five checks. The list checks fail a harmless reorder, the reply check passes three harmful ones, and the graph gets all six right without reading the database](assets/order-checks.png)
 
@@ -162,14 +188,17 @@ sent twice passes.
 ### 1c. Right effects
 
 The tool checks read what changed: the rows, the amounts, the card and the email text. The
-reply can be right while these are wrong. For A-1001, `billing_rows` in `scorers.py` expects
-one approval and one refund of 450, the approval first, and the order marked refunded. In run
-A, billing never asks, so the approval row is missing. In run C, the control, the refund is
-stamped 09:00:01 and the approval 09:00:02. Those are the same rows as a good run, so only the
-approval-before-refund check fails. For B-2002, `tool_effects` in `run_ext.py` expects one $240
-refund to the card that paid, an approval before it, a receipt that says $240 and one case note.
-The rows show the order only because a fake clock stamps each one, so if your backend keeps no
-write times, only the trajectory shows it.
+reply can be right while these are wrong. For A-1001, `billing_rows` in `scorers.py` expects one
+return row of 450 with its label sent, no refund before the item is back, and an email with the
+label. Every run ends before the item comes back, so any refund row breaks the rule. Run A
+leaves a refund row from step 7 and no return row, and its email at step 8 says the refund went
+out, so all three checks fail. In run C, the control, billing refunds at step 7 and opens the
+return at step 8, so only the refund check fails. For B-2002, `tool_effects` in `run_ext.py`
+expects one $240 refund to the card that paid, an approval before it, a receipt that says $240
+and one case note. When billing refunds before the approval, the rows are the same as a good
+run's, and only the approval-first check fails, because it reads the timestamps. The rows show
+the order only because a fake clock stamps each one, so if your backend keeps no write times,
+only the trajectory shows it.
 
 ## Grade 2: each handoff
 
@@ -192,7 +221,7 @@ A customer writes, "Order C-3003 arrived damaged. Refund please." The order cost
 expected route is policy, then billing. The keyword router's rule for "arrived", written for late
 parcels, matches first and sends the work to shipping. Shipping does its own job and ships a
 replacement nobody asked for. The rows and the reply fail. Only the route check names the cause:
-the orchestrator, at step 2.
+the orchestrator's handoff to shipping at step 2.
 
 ![Two refund requests through the keyword router. B-2002 goes to policy, then billing, and passes. C-3003 says "arrived", goes to shipping, and the route check names the orchestrator at step 2](assets/routing.gif)
 
@@ -235,7 +264,7 @@ answer an agent sends back to the agent that called it. `handoff_gaps` in `attri
 then. `NEEDS` lists those facts by sender and receiver:
 
 ```python
-REFUND_FACTS = ["order_id", "amount", "email", "approval"]
+REFUND_FACTS = ["order_id", "amount", "email", "return"]
 NEEDS = {  # (sender, receiver): the facts the receiver needs
     ("orchestrator", "policy-agent"): ["order_id", "reason"],
     ("policy-agent", "orchestrator"): REFUND_FACTS,
@@ -243,20 +272,21 @@ NEEDS = {  # (sender, receiver): the facts the receiver needs
 }
 ```
 
-In run A, the policy agent's `check_policy` result at step 4 says `needs_approval: true`, which
-the check reads as "before refund". Its answer at step 5 says nothing about approval, so the
-check prints `approval: knew 'before refund', sent 'none'`. The orchestrator's message to
-billing at step 6 passes, because it passed on all it knew. Only the policy agent's rules tool
-knows the $100 limit. Some real frameworks pass work this way too: LangChain's
+In run A, the policy agent's `check_policy` result at step 4 says `requires_return: true`, which
+the check reads as "before refund". Its answer at step 5 says nothing about a return, so the
+check prints `return: knew 'before refund', sent 'none'`. The orchestrator's message to billing
+at step 6 passes, because it passed on all it knew. Only the policy agent's rules tool knows the
+return rule. Some real frameworks pass work this way too: LangChain's
 [supervisor tutorial](https://docs.langchain.com/oss/python/langchain/supervisor) and the
 handoff orchestration in
 [Microsoft Agent Framework](https://github.com/microsoft/agent-framework/blob/fd52de71579162a888fb2dd7510c57c6014dcdfc/python/packages/orchestrations/agent_framework_orchestrations/_handoff.py#L418-L452)
 both pass on what an agent writes, not its tool results.
 
 Plain-text messages go through `read_facts` in `scorers.py`. Code reads the order ID, the
-amount and the email. For approval, a model judge would answer one closed question: what does
-this message say about manager approval? Here a phrase table written for the scripted messages
-stands in for that judge.
+amount and the email. For the return condition, a model judge would answer one closed question:
+what does this message say about getting the item back before the refund? Here a phrase table
+written for the scripted messages stands in for that judge. In run A, it finds no return phrase
+in the answer at step 5 or in the message to billing at step 6, so both read as "none".
 
 What a receiver needs depends on the job. Billing needs four facts after a policy verdict but
 only the order ID for a double charge, so `needs_for` in `team.py` swaps in each case's list.
@@ -267,24 +297,26 @@ nothing to check.
 
 `final_answer_check` in `scorers.py` passes the reply when it names what the case expects, the
 order ID and the amount for a refund. In run A, the outcome matches the customer's intention,
-since the customer gets the refund and the right reply. Only the two trajectory grades catch the
-broken approval rule. C-3003's reply, "A replacement for order C-3003 is on its way.", fails the
-refund intention. A reply that names the ID and the amount but turns the refund down would still
-pass, so use a judge for this check in your own tests.
+since the customer gets the refund and the right reply at step 10. Only the two trajectory
+grades catch that the money went out at step 7, before the item came back. C-3003's reply, "A
+replacement for order C-3003 is on its way.", fails the refund intention. A reply that names the
+ID and the amount but turns the refund down would still pass, so use a judge for this check in
+your own tests.
 
 Run each case more than once. `run_demo.py` runs the opening refund eight times with a flaky
-policy agent that leaves the approval out of its answer one time in four. With a fixed random
-seed, the same five runs pass all three grades every time. Pass^k is the chance that all k runs
-pass when you pick k of the eight at random. `passk.py` uses tau-bench's formula,
-C(c, k) / C(n, k), with n = 8 runs and c = 5 passes. At k = 1 it gives 0.625, the plain pass
-rate. At k = 8 it gives 0.000. Pass@k, the chance that at least one passes, reaches 1.000 at
-k = 4, because with three failures any four runs include a pass.
+policy agent that leaves the return condition out of its answer at step 5 one time in four. With
+a fixed random seed, the same five runs pass all three grades every time. Pass^k is the chance
+that all k runs pass when you pick k of the eight at random. `passk.py` uses tau-bench's
+formula, C(c, k) / C(n, k), with n = 8 runs and c = 5 passes. At k = 1 it gives 0.625, the plain
+pass rate. At k = 8 it gives 0.000. Pass@k, the chance that at least one passes, reaches 1.000
+at k = 4, because with three failures any four runs include a pass.
 
 ## Which agent caused the failure?
 
 `attribute_failure` in `attribution.py` (excerpt 3) goes through the steps in time order. A
 handoff is wrong when it fails the payload check, and a tool call is wrong when it breaks
-`money_rule`, which here is approval before a refund. The first wrong step is the cause, and its
+`money_rule`, which here is no refund before the item comes back (the bigger team in `team.py`
+swaps in its own `approval_rule` through `needs_for`). The first wrong step is the cause, and its
 owner is the agent that made that call or sent that message. The first broken rule is the
 symptom when it comes later. For run A, `run_demo.py` prints:
 
@@ -308,24 +340,26 @@ symptom when it comes later. For run A, `run_demo.py` prints:
 ```
 
 Keyed by receiver with nothing listed for the orchestrator, no check reads the policy agent's
-answer, and run A's cause moves to billing, the symptom. With one list for the orchestrator,
-even run B fails, because the orchestrator needs different facts from each sender. So check
-what each agent reports back, or failure attribution names the agent that acted, not the one
-that caused the failure.
+answer at step 5, and run A's cause moves to billing's refund at step 7, the symptom. With one
+list for the orchestrator, even run B fails at the customer's request at step 1, because the
+orchestrator needs different facts from each sender. So check what each agent reports back, or
+failure attribution names the agent that acted, not the one that caused the failure.
 
 `order_gaps` and `wrong_route` return findings in the same shape, so `first_wrong` takes the
 earliest one under every rule. [Who&When](https://arxiv.org/abs/2505.00212) also takes the
-earliest error as the main cause. When policy checks before it looks up the order, the handoff
-and money rules alone name billing at step 8. The order check moves the cause to policy at
-step 3. In the C-3003 run, the handoff and money rules find nothing, and the route check names
-the orchestrator at step 2.
+earliest error as the main cause. When the policy agent checks before it looks up the order,
+the handoff check and the bigger team's approval rule alone name billing's refund at step 8. The
+order check moves the cause to the policy agent's `check_policy` call at step 3. In the C-3003
+run, the handoff check and the bigger team's approval rule find nothing, and the route check
+names the orchestrator's handoff to shipping at step 2.
 
-The replay confirms step 5 in run A. It puts the approval sentence back into the policy agent's
-answer, has the policy agent's tools return what the trace recorded, and reruns the
-orchestrator and billing on a fresh database. Billing asks for approval first, and every check
-passes. In run B, every check passes and no one is named. In run C, the control, policy's answer
-and the message to billing both carry the approval rule, billing refunds first anyway, and
-billing is named at step 7.
+The replay confirms that step 5, the policy agent's answer, caused run A's failure. It puts the
+return sentence back into that answer, has the policy agent's tools at steps 3 and 4 return what
+the trace recorded, and reruns the orchestrator and billing on a fresh database. Billing now
+calls `create_return` at step 7, emails the return label at step 8 and pays no refund, and every
+check passes. In run B, every check passes and no one is named. In run C, the control, the
+answer at step 5 and the message to billing at step 6 both carry the return condition, billing
+refunds anyway at step 7, and the checks name billing at step 7.
 
 ## How it works
 
@@ -333,14 +367,14 @@ billing is named at step 7.
 
 Each run gets its own SQLite database and a fake clock, so every run writes the same timestamps.
 `agents.py` holds the three agents of the opening case, and `team.py` the four of the bigger
-team. In `agents.py`, the policy agent answers in plain text, and the orchestrator writes
-billing's task from that answer alone. The orchestrator and billing read text with their own
-patterns, never `read_facts`. The agents in `team.py` pass dicts. Both files record each run as
-OpenTelemetry spans that follow the GenAI semantic conventions. Each agent gets an
-`invoke_agent` span that holds its `chat` and `execute_tool` spans and the spans of any agent it
-calls. Each message between agents is a span event named `agent.message`.
+team. In `agents.py`, the policy agent answers in plain text at step 5, and the orchestrator
+writes billing's task at step 6 from that answer alone. The orchestrator and billing read text
+with their own patterns, never `read_facts`. The agents in `team.py` pass dicts. Both files
+record each run as OpenTelemetry spans that follow the GenAI semantic conventions. Each agent
+gets an `invoke_agent` span that holds its `chat` and `execute_tool` spans and the spans of any
+agent it calls. Each message between agents is a span event named `agent.message`.
 
-![The failing run as a span tree. The policy agent's answer at step 5 is the first wrong step. Billing's refund at step 7 is the first broken rule, a symptom](assets/span-tree.png)
+![The failing run as a span tree, with all 10 steps numbered. The policy agent's answer at step 5 is the first wrong step. Billing's refund at step 7 is the first broken rule, a symptom](assets/span-tree.png)
 
 ## Use it on your own agents
 
@@ -361,14 +395,15 @@ can fail CI.
    as well as handoffs, as an `agent.message` span event with `from`, `to` and the message as
    JSON in `content`, a dict of facts or a string of text, the way `_message_event` in
    `agents.py` does. `attribute_failure` learns what a sender knew from its tool results and the
-   messages that reached it, so without policy's answer at step 5, it names the orchestrator even
-   in the correct run.
+   messages that reached it, so without policy's answer at step 5, it names the orchestrator's
+   message to billing even in the correct run.
 4. Label each case with the customer's intention and the expected route, like `EXPECT` in
    `team.py`. From that label, write the reference lists (`REFS`), a rule per argument
    (`ARG_POLICY`, where an unlisted argument must match exactly), the order graph (`AFTER`,
    `ONCE` and `OWNER`), what the tools must change (`billing_rows`, `tool_effects`), the facts
    each receiver needs (`NEEDS`, keyed by sender and receiver, with `needs_for` when one agent
-   does two jobs) and your rules for tool calls (`money_rule`). Without your own rules,
+   does two jobs) and your rules for tool calls (`money_rule`, or your own rule swapped in with
+   `use_rules`, as `needs_for` does with `approval_rule`). Without your own rules,
    `attribute_failure` only finds handoffs that drop or change a fact.
 5. Test each checker on runs you know are wrong: the trap runs in `traps()` in `run_demo.py` for
    a matcher, every order of one agent's tools for a graph (`checker_test` in `run_ext.py`), and
@@ -380,8 +415,10 @@ can fail CI.
    recorded, and rerun the agents after it. `replay_check` in `run_demo.py` only works for the
    scripted agents here, so write your own. Then fix one thing and add two tests to CI: the
    recorded bad run must still fail, and the fixed system must pass every repeated run. For run
-   A, the fix is a required approval field in the policy agent's answer, which code, not a
-   model, copies into billing's input.
+   A, the fix is a required field for the refund condition in the policy agent's answer at
+   step 5, a structured output type that code, not a model, copies into billing's input at
+   step 6. A second guard in `issue_refund` refuses a refund until the order's return is
+   received.
 
 ![The diagnosis loop. Capture spans, rebuild the steps, find the first wrong step, name the agent that took it, name the failure, replay the suspect step, then fix one thing and add two tests to CI](assets/diagnosis-loop.png)
 
@@ -397,8 +434,11 @@ The agents, the router and the tool orders are all scripted, so the counts here 
 checks behave. To learn how often a real model fails them, run the checks on your own system.
 The 12 routing requests are made up, and `run_ext.py` prints no interval for them.
 
-Every refund in `team.py` is above $100, so `money_rule` (approval before any refund) and the
-policy (approval above $100) always agree.
+Every refund in `team.py` is above $100, so the bigger team's `approval_rule` (approval before
+any refund) and its policy (approval above $100) always agree.
+
+Every A-1001 run ends before the item comes back, so no return here is ever received, and
+`billing_rows` treats any refund row as too early.
 
 The phrase table in `read_facts` knows only the scripted messages here. A model judge can read
 the same message another way.
