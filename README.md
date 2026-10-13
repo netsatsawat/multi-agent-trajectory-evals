@@ -42,6 +42,15 @@ agent's tool result at step 4, and a tool result stays with the agent that calle
 the payload check never reads the answers agents send back, failure attribution names billing,
 and you fix billing while the policy agent keeps leaving the return condition out.
 
+The case is made up, but this kind of failure appears in framework docs and in research papers.
+[LangChain's supervisor tutorial](https://docs.langchain.com/oss/python/langchain/supervisor)
+says that "a common failure mode" is a sub-agent that calls tools but leaves the results out of
+its final response. [MAST](https://arxiv.org/abs/2503.13657) labelled the failures in more than
+1,600 traces from seven multi-agent frameworks. About a third of those failures happened
+between agents, and MAST says they arise from "a breakdown in critical information flow". A
+2026 preprint, [Facts Without Rules](https://arxiv.org/abs/2608.29028), found that a summary
+passed to the next agent keeps the facts but weakens the rules on how to use them.
+
 The agents are scripted Python stand-ins and every case is made up, so it all runs offline with
 no model and no API key. The checks read OpenTelemetry spans, so they also work on your own
 agents. I wrote this code as the harness for my article *Multi-Agent Trajectory Evaluation,
