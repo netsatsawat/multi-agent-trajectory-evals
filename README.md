@@ -25,9 +25,9 @@ step by step. The rest of this README uses these step numbers.
    kim@example.com.
 4. The policy agent calls `check_policy`, which returns `refundable: true` and
    `requires_return: true`.
-5. The policy agent answers the orchestrator in plain text: "Order A-1001 can be refunded. It
-   arrived broken, which the policy covers. It cost $450, paid by kim@example.com." The answer
-   leaves out that the item must come back first.
+5. The policy agent answers the orchestrator in plain text: "Order A-1001 can be refunded
+   because it arrived broken. It's a $450 order from kim@example.com." The answer leaves out that
+   the item must come back first.
 6. The orchestrator tells billing: "Refund order A-1001: $450 to kim@example.com. It arrived
    broken and policy says it can be refunded." It passes on only what the policy agent said.
 7. Billing calls `issue_refund` and pays the $450 before the item comes back.

@@ -233,9 +233,9 @@ def policy_agent(run, task, reports_return=True):
     oid = order["order_id"]
     if not verdict["refundable"]:
         return f"Order {oid} cannot be refunded for this reason."
-    answer = (f"Order {oid} can be refunded. It arrived {task['reason']},"
-              f" which the policy covers. It cost ${order['amount']},"
-              f" paid by {order['email']}.")
+    answer = (f"Order {oid} can be refunded because it arrived"
+              f" {task['reason']}. It's a ${order['amount']} order from"
+              f" {order['email']}.")
     if verdict["requires_return"] and reports_return:
         answer += " " + RETURN_LINE
     return answer
