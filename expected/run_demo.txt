@@ -13,7 +13,7 @@ span tree (the stand-in's chat spans carry no content):
       chat scripted-stand-in
       execute_tool check_policy  args={"order_id": "A-1001", "reason": "broken"}  result={"refundable": true, "requires_return": true}
       chat scripted-stand-in
-      [event agent.message] policy-agent -> orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com."
+      [event agent.message] policy-agent -> orchestrator: "Order A-1001 can be refunded because it arrived broken. It's a $450 order from kim@example.com."
     chat scripted-stand-in
     invoke_agent billing-agent
       [event agent.message] orchestrator -> billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded."
@@ -30,7 +30,7 @@ steps rebuilt from the spans, in time order:
    2. [orchestrator] message to policy-agent: {"order_id": "A-1001", "reason": "broken"}
    3. [policy-agent] get_order(order_id='A-1001')
    4. [policy-agent] check_policy(order_id='A-1001', reason='broken')
-   5. [policy-agent] message to orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com."
+   5. [policy-agent] message to orchestrator: "Order A-1001 can be refunded because it arrived broken. It's a $450 order from kim@example.com."
    6. [orchestrator] message to billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded."
    7. [billing-agent] issue_refund(order_id='A-1001', amount=450)
    8. [billing-agent] send_email(to='kim@example.com', body='Refund of $450 issued for A-1001.')
@@ -72,8 +72,8 @@ final answer: "Your refund of $450 for order A-1001 has been issued."
     correct run: cause none
 
 === Replay: policy's answer with the return sentence put back ===
-  answer as sent:      "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com."
-  with fact restored:  "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com. The refund is paid only after the item comes back, so a return label goes out first."
+  answer as sent:      "Order A-1001 can be refunded because it arrived broken. It's a $450 order from kim@example.com."
+  with fact restored:  "Order A-1001 can be refunded because it arrived broken. It's a $450 order from kim@example.com. The refund is paid only after the item comes back, so a return label goes out first."
   orchestrator now writes: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded. Send a return label first, and refund only once the item is back."
   billing now calls: create_return, send_email
   billing path                  PASS  1 of 2 in order, 1 not due yet
@@ -94,7 +94,7 @@ span tree (the stand-in's chat spans carry no content):
       chat scripted-stand-in
       execute_tool check_policy  args={"order_id": "A-1001", "reason": "broken"}  result={"refundable": true, "requires_return": true}
       chat scripted-stand-in
-      [event agent.message] policy-agent -> orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com. The refund is paid only after the item comes back, so a return label goes out first."
+      [event agent.message] policy-agent -> orchestrator: "Order A-1001 can be refunded because it arrived broken. It's a $450 order from kim@example.com. The refund is paid only after the item comes back, so a return label goes out first."
     chat scripted-stand-in
     invoke_agent billing-agent
       [event agent.message] orchestrator -> billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded. Send a return label first, and refund only once the item is back."
@@ -111,7 +111,7 @@ steps rebuilt from the spans, in time order:
    2. [orchestrator] message to policy-agent: {"order_id": "A-1001", "reason": "broken"}
    3. [policy-agent] get_order(order_id='A-1001')
    4. [policy-agent] check_policy(order_id='A-1001', reason='broken')
-   5. [policy-agent] message to orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com. The refund is paid only after the item comes back, so a return label goes out first."
+   5. [policy-agent] message to orchestrator: "Order A-1001 can be refunded because it arrived broken. It's a $450 order from kim@example.com. The refund is paid only after the item comes back, so a return label goes out first."
    6. [orchestrator] message to billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded. Send a return label first, and refund only once the item is back."
    7. [billing-agent] create_return(order_id='A-1001', amount=450, note='refund once the item is back')
    8. [billing-agent] send_email(to='kim@example.com', body='Return label for A-1001 attached. We refund $450 once the item arrives.')
@@ -152,7 +152,7 @@ span tree (the stand-in's chat spans carry no content):
       chat scripted-stand-in
       execute_tool check_policy  args={"order_id": "A-1001", "reason": "broken"}  result={"refundable": true, "requires_return": true}
       chat scripted-stand-in
-      [event agent.message] policy-agent -> orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com. The refund is paid only after the item comes back, so a return label goes out first."
+      [event agent.message] policy-agent -> orchestrator: "Order A-1001 can be refunded because it arrived broken. It's a $450 order from kim@example.com. The refund is paid only after the item comes back, so a return label goes out first."
     chat scripted-stand-in
     invoke_agent billing-agent
       [event agent.message] orchestrator -> billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded. Send a return label first, and refund only once the item is back."
@@ -171,7 +171,7 @@ steps rebuilt from the spans, in time order:
    2. [orchestrator] message to policy-agent: {"order_id": "A-1001", "reason": "broken"}
    3. [policy-agent] get_order(order_id='A-1001')
    4. [policy-agent] check_policy(order_id='A-1001', reason='broken')
-   5. [policy-agent] message to orchestrator: "Order A-1001 can be refunded. It arrived broken, which the policy covers. It cost $450, paid by kim@example.com. The refund is paid only after the item comes back, so a return label goes out first."
+   5. [policy-agent] message to orchestrator: "Order A-1001 can be refunded because it arrived broken. It's a $450 order from kim@example.com. The refund is paid only after the item comes back, so a return label goes out first."
    6. [orchestrator] message to billing-agent: "Refund order A-1001: $450 to kim@example.com. It arrived broken and policy says it can be refunded. Send a return label first, and refund only once the item is back."
    7. [billing-agent] issue_refund(order_id='A-1001', amount=450)
    8. [billing-agent] create_return(order_id='A-1001', amount=450, note='refund once the item is back')
