@@ -78,8 +78,8 @@ only dependency is the OpenTelemetry SDK, pinned to 1.45.0.
   a test of the order checkers on all 120 orders of billing's tools, a request sent to the wrong
   agent, every route forced on one case per intention, 12 requests through a keyword router, and
   a false-alarm test.
-- `check_excerpts.py` pulls out the five code blocks the article prints, checks their length,
-  writes them to `excerpts/` and runs each one alone.
+- `check_excerpts.py` pulls out five short excerpts of the scoring code, the ones this README
+  points to, checks their length, writes them to `excerpts/` and runs each one alone.
 
 Each script prints the same output every time, so CI compares it with its copy in `expected/`.
 On your copy, `diff <(.venv/bin/python run_ext.py) expected/run_ext.txt` should print nothing.
@@ -231,7 +231,7 @@ parcels, matches first and sends the work to shipping. Shipping does its own job
 replacement nobody asked for. The rows and the reply fail. Only the route check names the cause:
 the orchestrator's handoff to shipping at step 2.
 
-![Two refund requests through the keyword router. B-2002 goes to policy, then billing, and passes. C-3003 says "arrived", goes to shipping, and the route check names the orchestrator at step 2](assets/routing.gif)
+![Two refund requests through the keyword router. The blender refund goes to policy, then billing, and passes. The damaged parcel says "arrived", goes to shipping, and the route check names the orchestrator at step 2](assets/routing.gif)
 
 To see what each wrong agent does, `run_ext.py` forces every route on one case of each intention:
 
