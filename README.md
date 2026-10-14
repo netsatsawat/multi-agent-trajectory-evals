@@ -231,7 +231,7 @@ parcels, matches first and sends the work to shipping. Shipping does its own job
 replacement nobody asked for. The rows and the reply fail. Only the route check names the cause:
 the orchestrator's handoff to shipping at step 2.
 
-![Two refund requests through the keyword router. B-2002 goes to policy, then billing, and passes. C-3003 says "arrived", goes to shipping, and the route check names the orchestrator at step 2](assets/routing.gif)
+![Two refund requests through the keyword router. The blender refund goes to policy, then billing, and passes. The damaged parcel says "arrived", goes to shipping, and the route check names the orchestrator at step 2](assets/routing.gif)
 
 To see what each wrong agent does, `run_ext.py` forces every route on one case of each intention:
 
